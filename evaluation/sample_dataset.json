@@ -1,0 +1,20 @@
+[
+  {
+    "question": "What is health insurance?",
+    "answer": "Health insurance helps cover medical expenses.",
+    "contexts": ["Health insurance is a policy that covers medical expenses."],
+    "expected_keywords": ["health insurance", "medical expenses"]
+  },
+  {
+    "question": "What are common motor insurance exclusions?",
+    "answer": "Motor policies may exclude specified losses and conditions.",
+    "contexts": ["Motor insurance exclusions describe specified losses and conditions that are not covered."],
+    "expected_keywords": ["motor insurance", "exclusions", "not covered"]
+  },
+  {
+    "question": "Which documents are needed for a health insurance claim?",
+    "answer": "A claim normally needs hospital and policy documents.",
+    "contexts": ["Health insurance claims require relevant hospital documents and policy information."],
+    "expected_keywords": ["claim", "hospital documents", "policy information"]
+  }
+]

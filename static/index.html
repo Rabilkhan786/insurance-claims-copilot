@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Insurance Assistant</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    
+    <div class="main-container">
+        <div class="chat-card">
+            
+            <header class="chat-header">
+                <div class="header-content">
+                    <div class="bot-icon">
+                        <i class="fa-solid fa-user-shield"></i>
+                    </div>
+                    <div class="header-text">
+                        <h1>AI Insurance Assistant</h1>
+                        <p>Ask anything about your policies</p>
+                    </div>
+                </div>
+                <div class="header-controls">
+                    <button class="icon-btn" aria-label="Menu"><i class="fa-solid fa-ellipsis-vertical"></i></button>
+                </div>
+            </header>
+
+            <main class="chat-area" id="chatArea">
+                <div class="messages-container" id="messagesContainer">
+                    <div class="message assistant fade-in">
+                        <div class="avatar">
+                            <i class="fa-solid fa-user-shield"></i>
+                        </div>
+                        <div class="bubble">
+                            Hello! I am your virtual insurance assistant. How can I help you with your policy today?
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="typing-indicator hidden" id="typingIndicator">
+                    <div class="avatar">
+                        <i class="fa-solid fa-user-shield"></i>
+                    </div>
+                    <div class="bubble typing-bubble">
+                        <span class="dot"></span>
+                        <span class="dot"></span>
+                        <span class="dot"></span>
+                    </div>
+                </div>
+            </main>
+
+            <footer class="input-area">
+                <form id="chatForm" class="chat-form">
+                    <button type="button" class="mic-btn" aria-label="Voice Input">
+                        <i class="fa-solid fa-microphone"></i>
+                    </button>
+                    <div class="textarea-wrapper">
+                        <textarea id="userInput" placeholder="Type your question here..." rows="1"></textarea>
+                    </div>
+                    <button type="submit" class="send-btn" aria-label="Send Message" disabled>
+                        <i class="fa-solid fa-paper-plane"></i>
+                    </button>
+                </form>
+                <div class="disclaimer">
+                    Use this for general guidance. Consult your agent for official claims.
+                </div>
+            </footer>
+        </div>
+    </div>
+
+    <script src="/static/script.js"></script>
+</body>
+</html>

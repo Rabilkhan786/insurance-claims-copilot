@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Mic Test</title>
+<style>
+  body { font-family: sans-serif; padding: 24px; max-width: 600px; margin: auto; }
+  button { font-size: 18px; padding: 12px 24px; cursor: pointer; }
+  #log { white-space: pre-wrap; background: #f0f0f0; padding: 16px; margin-top: 16px;
+         border-radius: 8px; min-height: 200px; font-family: monospace; font-size: 14px; }
+  .ok { color: green; } .bad { color: red; } .info { color: #555; }
+</style>
+</head>
+<body>
+  <h2>Standalone Microphone / Speech Test</h2>
+  <p>This page has nothing to do with your app. It only tests what your
+     browser and OS actually do with the microphone. Click the button,
+     then copy everything that appears in the box below and send it back.</p>
+  <button id="testBtn">Tap to Test Microphone</button>
+  <div id="log">Waiting for you to click the button above...</div>
+
+<script>
+const logEl = document.getElementById('log');
+const btn = document.getElementById('testBtn');
+
+function log(msg, cls) {
+  const line = document.createElement('div');
+  if (cls) line.className = cls;
+  line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+  logEl.appendChild(line);
+}
+
+btn.addEventListener('click', async () => {
+  logEl.innerHTML = '';
+  log('Step 1: Checking browser support...', 'info');
+
+  log('User agent: ' + navigator.userAgent, 'info');
+
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SpeechRecognition) {
+    log('SpeechRecognition API is NOT supported by this browser at all.', 'bad');
+    log('This is a browser limitation, not fixable in app code. Try Chrome or Edge.', 'bad');
+    return;
+  }
+  log('SpeechRecognition API is supported.', 'ok');
+
+  log('Step 2: Requesting raw microphone access via getUserMedia...', 'info');
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    log('getUserMedia is not available (requires HTTPS or localhost).', 'bad');
+    return;
+  }
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    log('getUserMedia SUCCEEDED. Browser has real mic access.', 'ok');
+    const tracks = stream.getAudioTracks();
+    tracks.forEach(t => log(`  Mic device: ${t.label || '(no label)'} | enabled=${t.enabled} | muted=${t.muted}`, 'info'));
+    stream.getTracks().forEach(t => t.stop());
+  } catch (error) {
+    log(`getUserMedia FAILED: ${error.name} - ${error.message}`, 'bad');
+    log('This is the real, specific reason the mic does not work.', 'bad');
+    return;
+  }
+
+  log('Step 3: Starting SpeechRecognition and listening for 8 seconds...', 'info');
+  log('SPEAK NOW into your microphone.', 'info');
+
+  const recognition = new SpeechRecognition();
+  recognition.lang = 'en-US';
+  recognition.interimResults = true;
+  recognition.continuous = true;
+
+  let gotAnyResult = false;
+
+  recognition.onstart = () => log('Recognition started successfully.', 'ok');
+
+  recognition.onresult = (event) => {
+    gotAnyResult = true;
+    const text = event.results[event.results.length - 1][0].transcript;
+    log(`HEARD SOMETHING: "${text}"`, 'ok');
+  };
+
+  recognition.onerror = (event) => {
+    log(`Recognition error event: "${event.error}"`, event.error === 'no-speech' ? 'info' : 'bad');
+  };
+
+  recognition.onend = () => {
+    log('Recognition ended.', 'info');
+    if (!gotAnyResult) {
+      log('RESULT: No speech was ever picked up in this test window.', 'bad');
+      log('If getUserMedia succeeded above but this never heard anything,', 'bad');
+      log('the mic hardware/OS input level is likely the real problem,', 'bad');
+      log('not this app or its code.', 'bad');
+    } else {
+      log('RESULT: Speech recognition is working correctly on this machine/browser.', 'ok');
+    }
+  };
+
+  recognition.start();
+  setTimeout(() => { try { recognition.stop(); } catch (e) {} }, 8000);
+});
+</script>
+</body>
+</html>
