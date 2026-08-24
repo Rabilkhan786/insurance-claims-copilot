@@ -8,8 +8,12 @@ a citation baked in.
 from __future__ import annotations
 
 import logging
+import re
 
 logger = logging.getLogger(__name__)
+
+# "i", "(ii)", "3.", "12)" -- a serial number, never a column name.
+ROW_INDEX_PATTERN = re.compile(r"^\(?(?:[ivxlc]+|\d{1,3})\)?[.)]?$", re.I)
 
 # Cell values that mean "this cell is empty" once a PDF has been parsed.
 EMPTY_VALUES = {"", "nan", "none", "null", "-", "--", "n/a", "na"}
@@ -136,10 +140,23 @@ def table_to_rows(table: dict, table_type: str) -> list[dict]:
     if len(rows) < 2:
         return []
 
-    header = [_clean_cell(cell) or f"col_{index}" for index, cell in enumerate(rows[0])]
+    first = [_clean_cell(cell) for cell in rows[0]]
+
+    # A table split across two pages carries its header only on the first
+    # page, so the continuation starts on a data row -- "vi", "3.", "(ii)".
+    # Using that as the header produced columns named after a serial number
+    # and a paragraph of policy text, and silently swallowed the row itself.
+    # Positional names are honest about the column being unknown, and the
+    # row survives as data.
+    if first and ROW_INDEX_PATTERN.match(first[0]):
+        header = [f"col_{index}" for index in range(len(first))]
+        data_rows = rows
+    else:
+        header = [cell or f"col_{index}" for index, cell in enumerate(first)]
+        data_rows = rows[1:]
 
     records = []
-    for row in rows[1:]:
+    for row in data_rows:
         cells = [_clean_cell(cell) for cell in row]
         if all(_is_empty(cell) for cell in cells):
             continue

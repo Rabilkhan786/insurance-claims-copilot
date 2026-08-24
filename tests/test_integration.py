@@ -310,7 +310,15 @@ def test_sum_insured_balance_exposes_deductible_and_copay():
 # Any policy, no curated rows -- SQL -> RAG -> safe default
 # ===========================================================================
 # A real indexed policy that has no rows in any policy_* table.
-UNSEEDED_UIN = "BHAHLIP2014V011920"
+#
+# This moved from BHAHLIP2014V011920 once scripts/load_staged_tables.py began
+# loading extracted rows: that policy now has a curated cataract sub-limit, so
+# it no longer reaches the fallback these tests exist to cover.
+UNSEEDED_UIN = "ACKPAIP21638V012021"
+
+# Ambulance cover is the sub-limit this policy states in prose rather than in
+# a table, which is exactly the case SQL cannot answer.
+UNSEEDED_TREATMENT = "Ambulance charges"
 
 
 def test_the_unseeded_policy_really_has_no_curated_rows(policy_data):
@@ -325,7 +333,7 @@ def test_sub_limit_falls_back_to_the_policy_wording():
     """With no SQL row the cap must still be read out of the clause text."""
     from src.eligibility.engine import _lookup_sub_limit
 
-    amount = _lookup_sub_limit(UNSEEDED_UIN, "Cataract Surgery")
+    amount = _lookup_sub_limit(UNSEEDED_UIN, UNSEEDED_TREATMENT)
 
     assert amount is not None
     assert amount > 0
@@ -339,7 +347,7 @@ def test_missing_copay_defaults_to_none_not_a_guess():
     """
     from src.eligibility.engine import _lookup_copay
 
-    assert _lookup_copay(UNSEEDED_UIN, "Cataract Surgery") is None
+    assert _lookup_copay(UNSEEDED_UIN, UNSEEDED_TREATMENT) is None
 
 
 def test_missing_deductible_defaults_to_zero():

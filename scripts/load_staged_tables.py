@@ -1,42 +1,35 @@
-"""Report on artifacts/staged_tables.json, and (only if forced) load from it.
+"""Load the trustworthy rows of artifacts/staged_tables.json into crm.db.
 
-Run it with:  uv run python scripts/load_staged_tables.py
-It REPORTS by default and writes nothing. Writing needs --write, and you
-should read the warning below before passing that flag.
+Run it with:  uv run python scripts/load_staged_tables.py --write
+Without --write it reports what would load and changes nothing.
 
-DO NOT --write against the current extraction. Filtering the staged rows down
-to the ones with a cleanly parseable number is not enough, because the number
-is often real but means something else. Sampled from the rows that pass every
-filter here:
+Sub-limits and waiting periods only. Co-payments are deliberately left to
+retrieval -- their tables are benefit summaries where a real age-banded
+co-pay shares a table with a maternity sub-limit and a family discount, and
+no row-level rule separated them reliably. A wrong co-pay silently reduces a
+payout, so it is safer to read that clause with a citation.
 
-    40,000  "Cataract Treatment"                            <- correct
-         2  "Sinusitis and related disorders."              <- a YEAR count
-         5% "5% co pay on all claims"                       <- a co-pay
-        25% "Accidental Hospitalisation - 25% increase ..."  <- an INCREASE
-       100% "Restoration of the Sum Insured"                 <- a restore
-        10% "Death succeeding a hospitalization claim ..."    <- a DISCOUNT
+The eligibility engine looks a number up in these tables before it falls back
+to retrieval, and treats what it finds as authoritative. A wrong row here
+silently changes a payout, with no citation for the employee to check, so a
+row is only written when it can be shown to mean what its column says.
 
-Loading those would tell the engine a claim is capped at Rs 2 because a
-waiting-period table said "2 years", or cap it by a discount clause. The
-co-payment rows are worse: "0% | above 500 to 1000" is a room-rent slab
-bound, and loading it applies a co-pay that does not exist.
+Three filters do that work, each earned from a row that got through without
+it:
 
-The fix is upstream, in table_classifier/table_converter: the table type has
-to be right, and the header row has to be found, before these rows can be
-trusted. Until then the skipped rows are still reachable through RAG, where
-they carry a citation the employee can check -- which is strictly safer than a
-wrong number in the table the engine trusts first.
+  * NOT_A_LIMIT     -- a bonus, a restore or a no-claim discount states a
+                       percentage that parses exactly like a cap. "25%
+                       increase in balance SI" is not a 25% limit.
+  * NOT_A_SUBJECT   -- "66-70" and "1 year" are an age band and a duration
+                       that landed in the subject column, not things a limit
+                       can apply to.
+  * NOT_A_CONDITION -- "Only PEDs declared in the Proposal Form ..." is the
+                       definition of a waiting period, not a condition it
+                       applies to.
 
-Scale of the problem, measured over the current 1,333 staged rows:
-
-  * only 13% of the sub_limit rows contain an amount or a percentage at all
-  * 30% of all rows have a row index ("i", "ii", "3") as their column header,
-    because PyMuPDF picked a data row as the header row
-  * of the 53 sub_limit rows that survive every filter here, a sample of 12
-    contained roughly 3 genuine sub-limits
-
-The report below counts what *would* load, so the number is a progress
-measure for fixing the classifier -- not a suggestion to run --write.
+Everything skipped is still reachable through retrieval, where it carries a
+citation -- strictly safer than a wrong number in the table the engine
+consults first.
 """
 from __future__ import annotations
 
@@ -52,9 +45,40 @@ from src.policy_data import PolicyDataStore  # noqa: E402
 
 STAGED_PATH = Path(__file__).resolve().parents[1] / "artifacts" / "staged_tables.json"
 
-# "Rs. 40,000", "INR 40000". The leading \d matters: [\d,]+ alone matches a
-# bare comma, and "Rs. ," then parsed as an empty amount.
-AMOUNT_PATTERN = re.compile(r"(?:rs\.?|inr|₹)\s*(\d[\d,]*(?:\.\d+)?)", re.I)
+# "Rs. 40,000", "INR 40000", "Rs 1,00,000".
+#
+# The digit groups allow a space around the comma because PDF text
+# extraction inserts one: a real policy reads "Rs.40, 000/-", and a pattern
+# that stopped at the space parsed it as 40 -- a thousandfold understatement
+# of a genuine cataract sub-limit. Requiring a comma between groups keeps
+# "Rs 5,000 3 times" from being read as 50003.
+AMOUNT_PATTERN = re.compile(
+    r"(?:rs\.?|inr|₹)\s*(\d{1,3}(?:\s?,\s?\d{2,3})+(?:\.\d+)?|\d+(?:\.\d+)?)",
+    re.I,
+)
+
+# A sub-limit's subject has to name something. Age bands ("66-70",
+# "76 & above") and bare values ("10.0%") arrive when a co-payment-by-age
+# table is misread as a limits table, and loading them would cap a claim
+# by an age bracket.
+NOT_A_SUBJECT = re.compile(
+    r"^[\d\s.,%&+/-]*$"           # "10.0%", "66-70"
+    r"|^\d+\s*&\s*above$"          # "76 & above"
+    r"|^\d+\s*(year|month|day|week)s?$",  # "1 year" -- the value, not a subject
+    re.I,
+)
+
+# A waiting-period condition names a disease or a procedure. These phrases
+# mean the cell holds clause prose or an eligibility rule instead -- "Only
+# PEDs declared in the Proposal Form ..." is the definition of the waiting
+# period, not a condition it applies to, and loading it would put a 48-month
+# wait under a condition no treatment can ever match.
+NOT_A_CONDITION = re.compile(
+    r"\b(proposal form|policy can be|can be availed|shall be|declared and|"
+    r"accepted for coverage|as specified|whichever)\b",
+    re.I,
+)
+
 PERCENT_PATTERN = re.compile(r"(\d+(?:\.\d+)?)\s*%")
 MONTHS_PATTERN = re.compile(r"(\d+)\s*month", re.I)
 YEARS_PATTERN = re.compile(r"(\d+)\s*year", re.I)
@@ -67,6 +91,17 @@ JUNK_HEADER = re.compile(r"^[ivxlc]+$|^\d+$", re.I)
 SUBJECT_HINTS = (
     "ailment", "disease", "surgery", "procedure", "treatment", "benefit",
     "particular", "feature", "cover", "condition", "item", "description",
+)
+
+# A benefit-summary table lists real sub-limits next to things that are not
+# limits at all -- a cumulative bonus, a restore, a no-claim discount. The
+# percentage in "25% increase in balance SI" parses exactly like the one in
+# "25% of sum insured", so the number cannot tell them apart. The wording
+# can: anything that ADDS to the cover is not a cap on it.
+NOT_A_LIMIT = re.compile(
+    r"\b(increase|increment|restor\w*|reinstat\w*|bonus|discount|"
+    r"co[- ]?pay\w*|refund|cumulative|add[- ]?on|waiver)\b",
+    re.I,
 )
 
 
@@ -108,7 +143,9 @@ def parse_amount(row: dict) -> tuple[float, str] | None:
 
     match = AMOUNT_PATTERN.search(text)
     if match:
-        return float(match.group(1).replace(",", "")), "amount"
+        # Strip both separators: extraction leaves "40, 000" for "40,000".
+        digits = match.group(1).replace(",", "").replace(" ", "")
+        return float(digits), "amount"
 
     match = PERCENT_PATTERN.search(text)
     if match:
@@ -140,6 +177,12 @@ def load_sub_limits(store, rows, counts, dry_run) -> None:
             counts["sub_limit_skipped"] += 1
             continue
 
+        # A bonus or a restore is not a cap, however cleanly its number parses,
+        # and an age band is not a subject.
+        if NOT_A_LIMIT.search(subject) or NOT_A_SUBJECT.match(subject):
+            counts["sub_limit_skipped"] += 1
+            continue
+
         value, limit_type = parsed
         if not dry_run:
             store.add_sub_limit(
@@ -163,6 +206,10 @@ def load_waiting_periods(store, rows, counts, dry_run) -> None:
             counts["waiting_period_skipped"] += 1
             continue
 
+        if NOT_A_SUBJECT.match(subject) or NOT_A_CONDITION.search(subject):
+            counts["waiting_period_skipped"] += 1
+            continue
+
         if not dry_run:
             store.add_waiting_period(
                 policy_uin=entry["uin"],
@@ -172,26 +219,6 @@ def load_waiting_periods(store, rows, counts, dry_run) -> None:
                 page=int(entry["page"]),
             )
         counts["waiting_period_loaded"] += 1
-
-
-def load_copayments(store, rows, counts, dry_run) -> None:
-    """Insert co-payment rows that state a percentage."""
-    for entry in rows:
-        row = entry["row"]
-        match = PERCENT_PATTERN.search(_row_text(row))
-        if not (is_trustworthy(row) and match):
-            counts["copayment_skipped"] += 1
-            continue
-
-        if not dry_run:
-            store.add_copayment(
-                policy_uin=entry["uin"],
-                insurer=entry["insurer"],
-                condition=(pick_subject(row) or "all claims")[:200],
-                copay_percent=float(match.group(1)),
-                page=int(entry["page"]),
-            )
-        counts["copayment_loaded"] += 1
 
 
 def main() -> None:
@@ -216,16 +243,15 @@ def main() -> None:
     store = PolicyDataStore(settings.crm_db_path)
     counts: dict[str, int] = {
         f"{name}_{state}": 0
-        for name in ("sub_limit", "waiting_period", "copayment")
+        for name in ("sub_limit", "waiting_period")
         for state in ("loaded", "skipped")
     }
 
     load_sub_limits(store, by_type.get("sub_limit", []), counts, dry_run)
     load_waiting_periods(store, by_type.get("waiting_period", []), counts, dry_run)
-    load_copayments(store, by_type.get("copayment", []), counts, dry_run)
 
     print("")
-    for name in ("sub_limit", "waiting_period", "copayment"):
+    for name in ("sub_limit", "waiting_period"):
         loaded, skipped = counts[f"{name}_loaded"], counts[f"{name}_skipped"]
         total = loaded + skipped
         share = f"{100 * loaded / total:.0f}%" if total else "-"

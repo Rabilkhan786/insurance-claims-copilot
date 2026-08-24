@@ -57,24 +57,70 @@ SKIP_KEYWORDS = (
 )
 
 # --- tables that give us both structured rows and good sentences ---------
+# Each entry is (keyword, weight); a table's score for a type is the sum of
+# the weights that matched.
+#
+# WHY scoring rather than first-match-wins: this used to be a plain dict
+# checked in insertion order, with sub_limit first and "cataract"/"hernia"
+# among its keywords. A waiting-period table that lists ailments -- and they
+# all list cataract and hernia -- matched sub_limit before its own
+# "waiting period" keyword was ever reached, so the rows were staged under
+# the wrong type and their "1 year" landed where a rupee amount belonged.
+#
+# Naming a disease is weak evidence (weight 1): every kind of table in these
+# policies mentions the same diseases. Naming the mechanism -- "sub-limit",
+# "waiting period", "co-payment" -- is what actually identifies the table.
 SQL_AND_PINECONE_KEYWORDS = {
-    "sub_limit": ("sub-limit", "cataract", "hernia", "limit per claim"),
-    "waiting_period": ("waiting period", "ailment / disease", "benign ent"),
-    "copayment": ("co-payment", "co-pay", "patient shall bear"),
-    "room_rent": ("room rent limit", "icu charges", "per day"),
-    "plan_comparison": ("silver", "gold", "diamond", "vital plan", "topaz"),
+    "waiting_period": (
+        ("waiting period", 6),
+        ("ailment / disease", 5),
+        ("benign ent", 3),
+    ),
+    "sub_limit": (
+        ("sub-limit", 6),
+        ("sublimit", 6),
+        ("sub limit", 6),
+        ("limit per claim", 5),
+        ("cataract", 1),
+        ("hernia", 1),
+    ),
+    "copayment": (
+        ("co-payment", 6),
+        ("co-pay", 5),
+        ("copayment", 6),
+        ("patient shall bear", 4),
+    ),
+    "room_rent": (
+        ("room rent limit", 6),
+        ("room rent", 4),
+        ("icu charges", 5),
+        ("per day", 2),
+    ),
+    "plan_comparison": (
+        ("vital plan", 5),
+        ("topaz", 5),
+        ("silver", 2),
+        ("gold", 2),
+        ("diamond", 2),
+    ),
     "accidental_payout": (
-        "loss covered",
-        "percentage of sum insured",
-        "accidental death",
+        ("loss covered", 5),
+        ("percentage of sum insured", 4),
+        ("accidental death", 4),
     ),
     "modern_treatment": (
-        "robotic",
-        "deep brain",
-        "oral chemotherapy",
-        "stereotactic",
+        ("robotic", 5),
+        ("deep brain", 5),
+        ("oral chemotherapy", 5),
+        ("stereotactic", 5),
     ),
 }
+
+# A type needs this much evidence to win. Below it the table falls through to
+# the SQL-only and Pinecone-only checks, and finally to "unknown" -- which is
+# the honest answer, and far better than staging rows under a type whose
+# columns mean something else.
+MIN_TABLE_SCORE = 3
 
 # --- lookup tables: far too many rows to embed, perfect for SQL ----------
 SQL_ONLY_KEYWORDS = {
@@ -115,6 +161,21 @@ def table_to_text(table: dict) -> str:
 def _matches_any(haystack: str, keywords: tuple[str, ...]) -> bool:
     """Return True if any keyword appears in the flattened table text."""
     return any(keyword in haystack for keyword in keywords)
+
+
+def _score_type(haystack: str, weighted_keywords: tuple) -> int:
+    """Add up the weights of every keyword present in the table text."""
+    return sum(weight for keyword, weight in weighted_keywords if keyword in haystack)
+
+
+def _best_scoring_type(haystack: str) -> tuple[str, int]:
+    """Return the highest-scoring table type and its score."""
+    scores = {
+        table_type: _score_type(haystack, keywords)
+        for table_type, keywords in SQL_AND_PINECONE_KEYWORDS.items()
+    }
+    best = max(scores, key=scores.get)
+    return best, scores[best]
 
 
 def _is_hospital_network(table: dict) -> bool:
@@ -162,9 +223,9 @@ def classify_table(table: dict) -> dict:
     if _is_hospital_network(table):
         return {"table_type": "hospital_network", "destination": SQL_ONLY}
 
-    for table_type, keywords in SQL_AND_PINECONE_KEYWORDS.items():
-        if _matches_any(text, keywords):
-            return {"table_type": table_type, "destination": SQL_AND_PINECONE}
+    best_type, best_score = _best_scoring_type(text)
+    if best_score >= MIN_TABLE_SCORE:
+        return {"table_type": best_type, "destination": SQL_AND_PINECONE}
 
     for table_type, keywords in SQL_ONLY_KEYWORDS.items():
         if _matches_any(text, keywords):
