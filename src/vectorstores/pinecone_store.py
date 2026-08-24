@@ -1,4 +1,5 @@
 """Adapters for the existing dense and hosted sparse Pinecone indexes."""
+import time
 from typing import Any
 
 from config import settings
@@ -53,6 +54,28 @@ class PineconeHybridStore:
         self.dense_index = self.client.Index(settings.dense_index_name)
         self.sparse_index = self.client.Index(settings.sparse_index_name)
 
+    def _upsert_with_retry(self, upsert, label: str, attempts: int = 4) -> None:
+        """Run one upsert, retrying a timeout with a longer pause each time.
+
+        WHY: a full re-index writes ~4,000 vectors in ~45 batches, and a
+        single slow network moment raises PineconeTimeoutError and kills the
+        whole run partway through -- leaving the index half-populated, which
+        is worse than either full or empty. Upserts are idempotent here
+        (document_id() hashes the content), so retrying is always safe.
+        """
+        from pinecone.errors.exceptions import PineconeTimeoutError
+
+        for attempt in range(1, attempts + 1):
+            try:
+                upsert()
+                return
+            except (PineconeTimeoutError, TimeoutError) as error:
+                if attempt == attempts:
+                    raise
+                pause = 5 * attempt
+                print(f"    {label}: write timed out, retry {attempt}/{attempts - 1} in {pause}s")
+                time.sleep(pause)
+
     def index_documents(self, documents: list) -> None:
         """Upsert matching document IDs into the two independent indexes."""
         texts = [document.page_content for document in documents]
@@ -87,22 +110,34 @@ class PineconeHybridStore:
                     }
                 )
 
-            self.dense_index.upsert(
-                vectors=dense_records,
-                namespace=settings.namespace,
+            self._upsert_with_retry(
+                lambda: self.dense_index.upsert(
+                    vectors=dense_records,
+                    namespace=settings.namespace,
+                ),
+                "dense",
             )
-            self.sparse_index.upsert_records(
-                namespace=settings.namespace,
-                records=sparse_records,
+            self._upsert_with_retry(
+                lambda: self.sparse_index.upsert_records(
+                    namespace=settings.namespace,
+                    records=sparse_records,
+                ),
+                "sparse",
             )
+            print(f"    upserted {start + len(batch_documents)}/{len(documents)}")
 
-    def dense_search(self, query: str) -> list[dict[str, Any]]:
+    def dense_search(
+        self,
+        query: str,
+        metadata_filter: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
         embedding = self.embedder.embed_query(query)
         response = self.dense_index.query(
             vector=embedding,
             top_k=settings.dense_top_k,
             include_metadata=True,
             namespace=settings.namespace,
+            filter=metadata_filter,
         )
         return [
             {
@@ -113,14 +148,16 @@ class PineconeHybridStore:
             for item in response.matches
         ]
 
-    def sparse_search(self, query: str) -> list[dict[str, Any]]:
-        search_query = {
-            "top_k": settings.sparse_top_k,
-            "inputs": {"text": query},
-        }
+    def sparse_search(
+        self,
+        query: str,
+        metadata_filter: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
         response = self.sparse_index.search(
             namespace=settings.namespace,
-            query=search_query,
+            top_k=settings.sparse_top_k,
+            inputs={"text": query},
+            filter=metadata_filter,
         )
         return [
             {

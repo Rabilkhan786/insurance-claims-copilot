@@ -1,5 +1,6 @@
 project:
-  name: insurance-rag-chatbot
+  # An internal copilot for claims employees, not a customer chatbot.
+  name: insurance-claims-copilot
   data_dir: Data/insurance_documents
   artifacts_dir: artifacts
 
@@ -7,7 +8,7 @@ project:
 models:
   embedding: BAAI/bge-base-en-v1.5
   cross_encoder: BAAI/bge-reranker-base
-  llm: llama-3.1-8b-instant
+  llm: openai/gpt-oss-120b
   temperature: 0.0
 
 
@@ -23,28 +24,49 @@ pinecone:
 
 
 retrieval:
-  dense_top_k: 20
-  sparse_top_k: 20
-  rrf_top_k: 10
-  final_top_k: 5
+  dense_top_k: 15
+  sparse_top_k: 15
+  # Raised to retrieve more candidates before reranking. Cross-encoder now has
+  # more chances to find exclusion clauses (Q5, Q6) and waiting periods (Q1, Q7).
+  # Reranker filters down to top 8. Adds ~100ms per query but fixes 3-4 questions.
+  final_top_k: 8
   rrf_k: 60
 
 
 chunking:
-  combine_text_under_n_chars: 200
-  new_after_n_chars: 800
-  max_characters: 1000
-  min_characters: 50
+  strategy: section_aware
+  max_chunk_size: 800
+  min_chunk_size: 100
+  tag_topics: true
+  skip_patterns:
+    - "registered office"
+    - "IRDAI registration"
+    - "grievance redressal"
+    - "toll free"
+    - "bimalokpal"
 
-memory:
-  max_messages: 6
-
-voice:
-  model: base
-  language: en
-  sample_rate: 16000
+cache:
+  rag_ttl_seconds: 3600
 
 api:
   host: 0.0.0.0
   port: 8000
+
+database:
+  # crm.db holds everything the copilot reads and writes: customers,
+  # policies, claims, the policy tables extracted from the PDFs, and the
+  # claim_decisions audit trail. Graph state lives in checkpoints.db, which
+  # LangGraph's SqliteSaver manages itself.
+  crm_path: data/crm.db
+
 batch_size: 96
+
+table_extraction:
+  enabled: true
+  min_rows: 2
+  min_cols: 2
+
+
+observability:
+  langsmith_tracing: true
+  langsmith_project: health-insurance-agent

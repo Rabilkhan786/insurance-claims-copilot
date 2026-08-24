@@ -11,13 +11,28 @@ venv/
 .venv/
 
 .pytest_cache/
+.pytest_tmp/
 artifacts/
-data/
+data/*.db
 
 .DS_Store
 .idea/
 .vscode/
 
-test*.py
+/test*.py
 *.log
 .ragas_env
+
+.CLAUDE.md
+
+.claude
+eval_run.log
+CLAUDE.md
+BUILD_PLAN.md
+
+# SQLite temp files
+*.db-shm
+*.db-wal
+
+# Notebooks (optional for production)
+notebooks/

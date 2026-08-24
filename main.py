@@ -1,4 +1,9 @@
-"""Root entry point for the PDF-to-Pinecone indexing workflow."""
+"""Root entry point for the PDF-to-Pinecone indexing workflow.
+
+This now runs the section-aware pipeline (src/ingestion/pipeline.py) rather
+than the old Unstructured title-chunker. To wipe Pinecone first, use
+scripts/reindex.py instead -- this file only adds to what is already there.
+"""
 from __future__ import annotations
 
 import json
@@ -6,22 +11,27 @@ import logging
 from datetime import UTC, datetime
 
 from config import settings
-from src.embeddings import BGEEmbedder
-from src.ingestion import load_pdf_documents
+from src.ingestion import run_pipeline
 from src.utils import configure_logging
-from src.vectorstores import PineconeHybridStore
 
 
 logger = logging.getLogger(__name__)
 
 
-def save_indexing_manifest(document_count: int) -> None:
+def save_indexing_manifest(counters: dict) -> None:
     """Save the latest indexing run's result in the artifacts folder."""
     settings.artifacts_dir.mkdir(parents=True, exist_ok=True)
 
     manifest = {
         "indexed_at": datetime.now(UTC).isoformat(),
-        "document_count": document_count,
+        "pdf_count": counters["pdfs"],
+        "document_count": counters["documents"],
+        "text_chunks": counters["chunks"],
+        "table_sentences": counters["table_sentences"],
+        "sql_rows_staged": counters["sql_rows"],
+        "tables_skipped": counters["tables_skipped"],
+        "tables_by_type": counters["tables_by_type"],
+        "chunk_strategy": settings.chunk_strategy,
         "embedding_model": settings.embedding_model,
         "dense_index": settings.dense_index_name,
         "sparse_index": settings.sparse_index_name,
@@ -36,24 +46,19 @@ def save_indexing_manifest(document_count: int) -> None:
 
 
 def main() -> None:
-    """Load PDFs, embed them, and upload dense and sparse index records."""
+    """Parse every policy PDF, embed the chunks, and upload them."""
     configure_logging()
 
-    documents = load_pdf_documents()
-    if not documents:
+    counters = run_pipeline(push_to_pinecone=True)
+    if not counters["documents"]:
         raise RuntimeError(
             f"No eligible PDF chunks found in {settings.data_dir}"
         )
 
-    embedder = BGEEmbedder()
-    vector_store = PineconeHybridStore(embedder)
-
-    vector_store.ensure_indexes()
-    vector_store.index_documents(documents)
-    save_indexing_manifest(len(documents))
+    save_indexing_manifest(counters)
 
     manifest_path = settings.artifacts_dir / "indexing_manifest.json"
-    logger.info("indexing_complete document_count=%s", len(documents))
+    logger.info("indexing_complete document_count=%s", counters["documents"])
     logger.info("dense_index=%s", settings.dense_index_name)
     logger.info("sparse_index=%s", settings.sparse_index_name)
     logger.info("artifact=%s", manifest_path)
