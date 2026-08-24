@@ -140,10 +140,6 @@ class _AnswerGenerator:
         return self.model.invoke(messages).content  # final attempt, let it raise
 
 
-def _build_answer_generator() -> _AnswerGenerator:
-    return _AnswerGenerator()
-
-
 class _BGELangchainEmbeddings:
     """Adapts BGEEmbedder to the LangChain Embeddings interface RAGAS expects."""
 
@@ -161,18 +157,11 @@ def load_dataset() -> list[dict]:
     return json.loads(DATASET_PATH.read_text(encoding="utf-8"))
 
 
-def pick_smoke(entries: list[dict]) -> list[dict]:
-    """Pick 1 question per topic (5 questions total) for a quick smoke test."""
-    selected = []
-    for topic in EVAL_TOPICS:
-        bucket = [e for e in entries if e.get("topic") == topic]
-        if bucket:
-            selected.append(bucket[0])
-    return selected
+def pick_balanced(entries: list[dict], n_per_topic: int) -> list[dict]:
+    """Pick n_per_topic questions from each topic for a representative subset.
 
-
-def pick_balanced(entries: list[dict], n_per_topic: int = 4) -> list[dict]:
-    """Pick n_per_topic questions from each topic for a representative subset."""
+    n_per_topic=1 is the smoke test, 2 is the full 10-question dataset.
+    """
     selected = []
     for topic in EVAL_TOPICS:
         bucket = [e for e in entries if e.get("topic") == topic]
@@ -184,7 +173,7 @@ def _truncate_contexts(contexts: list[str]) -> list[str]:
     """Trim contexts so total chars stay under MAX_CONTEXT_CHARS.
 
     Keeps as many full chunks as possible; truncates the last one if needed.
-    This keeps the RAGAS judge prompt under the Cerebras 8K context window.
+    This keeps the RAGAS judge prompt inside Groq's context window.
     """
     result = []
     total = 0
@@ -319,13 +308,13 @@ def build_ragas_samples(entries: list[dict]) -> list:
     """Generate answers for every dataset entry."""
     from ragas import SingleTurnSample
 
-    generator = _build_answer_generator()
+    generator = _AnswerGenerator()
     samples = []
 
     for index, entry in enumerate(entries, start=1):
         print(f"  [{index}/{len(entries)}] {entry['topic']}: {entry['question'][:70]}")
         if index > 1:
-            # Cerebras free tier 429s if answers are generated back to back.
+            # Groq's free tier 429s if answers are generated back to back.
             time.sleep(ANSWER_DELAY_SECONDS)
         answer, contexts = answer_question(
             entry["question"], entry["context_uin"], generator,
@@ -475,14 +464,11 @@ def main() -> None:
     print(f"Context cap  : {MAX_CONTEXT_CHARS:,} chars per question (~3,000 tokens)")
     print(f"Eval delay   : {EVAL_DELAY_SECONDS}s between questions")
 
-    all_entries = load_dataset()
-    if args.smoke:
-        entries = pick_smoke(all_entries)
-        print(f"Running smoke test: {len(entries)} questions (1 per topic)")
-    else:
-        entries = pick_balanced(all_entries, n_per_topic=2)
-        topics = ", ".join(f"2x{t}" for t in EVAL_TOPICS)
-        print(f"Running the full {len(entries)}-question dataset ({topics})")
+    per_topic = 1 if args.smoke else 2
+    entries = pick_balanced(load_dataset(), per_topic)
+    label = "smoke test" if args.smoke else "full dataset"
+    topics = ", ".join(f"{per_topic}x{t}" for t in EVAL_TOPICS)
+    print(f"Running the {len(entries)}-question {label} ({topics})")
 
     print("\nGenerating answers...")
     samples = build_ragas_samples(entries)

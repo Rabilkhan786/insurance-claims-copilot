@@ -48,7 +48,6 @@ def test_all_tables_can_be_created_without_errors(tmp_path):
     expected = {
         "customers", "policies", "claims", "claim_decisions",
         "policy_sub_limits", "policy_waiting_periods", "policy_copayments",
-        "policy_room_rent", "network_hospitals", "day_care_procedures",
     }
 
     assert expected.issubset(_table_names(crm_db))

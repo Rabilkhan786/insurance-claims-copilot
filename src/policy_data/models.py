@@ -50,35 +50,6 @@ CREATE TABLE IF NOT EXISTS policy_copayments (
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
-CREATE TABLE IF NOT EXISTS policy_room_rent (
-    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-    policy_uin          TEXT NOT NULL,
-    insurer             TEXT,
-    sum_insured_min     REAL,
-    sum_insured_max     REAL,
-    room_rent_limit     REAL,
-    icu_limit           REAL,
-    page                INTEGER,
-    created_at          TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS network_hospitals (
-    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-    hospital_name       TEXT NOT NULL,
-    city                TEXT,
-    insurer             TEXT,
-    cashless_status     TEXT NOT NULL DEFAULT 'available'
-                        CHECK (cashless_status IN ('available', 'suspended', 'unavailable')),
-    created_at          TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS day_care_procedures (
-    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-    procedure_name      TEXT NOT NULL,
-    procedure_category  TEXT,
-    created_at          TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
 CREATE INDEX IF NOT EXISTS idx_sub_limits_uin ON policy_sub_limits(policy_uin);
 CREATE INDEX IF NOT EXISTS idx_waiting_periods_uin
     ON policy_waiting_periods(policy_uin);
@@ -96,9 +67,4 @@ CREATE TABLE IF NOT EXISTS policy_deductibles (
 
 CREATE INDEX IF NOT EXISTS idx_copayments_uin ON policy_copayments(policy_uin);
 CREATE INDEX IF NOT EXISTS idx_deductibles_uin ON policy_deductibles(policy_uin);
-CREATE INDEX IF NOT EXISTS idx_room_rent_uin ON policy_room_rent(policy_uin);
-CREATE INDEX IF NOT EXISTS idx_network_hospitals_name
-    ON network_hospitals(hospital_name);
-CREATE INDEX IF NOT EXISTS idx_day_care_name
-    ON day_care_procedures(procedure_name);
 """

@@ -12,12 +12,12 @@ engine (Prompt 3) has to handle correctly:
 
 Their policies reference REAL UINs pulled from the 20 PDFs in
 Data/insurance_documents/, and the policy_data facts below (sub-limits,
-waiting periods, room rent) are transcribed from those same PDFs rather than
-invented, so a citation like "UIN SHAHLIP22027V032122, page 8" is honest.
+waiting periods, co-payments, deductibles) are transcribed from those same
+PDFs rather than invented, so a citation like "UIN SHAHLIP22027V032122,
+page 8" is honest.
 """
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 
@@ -29,9 +29,6 @@ from config import settings  # noqa: E402
 from src.decisions import DecisionStore  # noqa: E402
 from src.crm import CRMStore  # noqa: E402
 from src.policy_data import PolicyDataStore  # noqa: E402
-
-STAGED_TABLES_PATH = ROOT / "artifacts" / "staged_tables.json"
-
 
 # ---------------------------------------------------------------------------
 # CRM: customers, policies and claims
@@ -299,71 +296,6 @@ DEDUCTIBLES = [
     },
 ]
 
-ROOM_RENT = [
-    {
-        "policy_uin": "SHAHLIP22027V032122",
-        "insurer": "Star Health",
-        "sum_insured_min": 0,
-        "sum_insured_max": 99999999,
-        "room_rent_limit": 5000,
-        "icu_limit": 10000,
-        "page": 8,
-    },
-]
-
-# A clean subset of real day-care procedure names pulled out of the
-# Future Generali / Navi General day-care tables. The full extracted table
-# has font-encoding artifacts from the source PDFs, so this list was
-# hand-picked rather than bulk-imported.
-DAY_CARE_PROCEDURES = [
-    ("Adenoidectomy", "ENT"),
-    ("Appendectomy", "general_surgery"),
-    ("Coronary Artery Bypass Grafting (CABG)", "cardiac"),
-    ("Coronary angiography", "cardiac"),
-    ("Coronary angioplasty", "cardiac"),
-    ("Dialysis", "renal"),
-    ("Dilatation & Curettage", "gynaecology"),
-    ("ERCP (Endoscopic Retrograde Cholangiopancreatography)", "gastroenterology"),
-    ("Tonsillectomy", "ENT"),
-    ("Total Knee Replacement (per knee)", "orthopaedic"),
-    ("Total Hip Replacement (per hip)", "orthopaedic"),
-    ("Cataract Surgery", "ophthalmology"),
-    ("Lithotripsy", "urology"),
-    ("Pacemaker insertion", "cardiac"),
-    ("Excision of Cyst/granuloma/lump", "general_surgery"),
-]
-
-
-def load_staged_hospitals() -> list[dict]:
-    """Load the real network-hospital rows the ingestion pipeline staged.
-
-    Falls back to an empty list if scripts/reindex.py has not been run yet,
-    so seeding still works without Pinecone credentials.
-    """
-    if not STAGED_TABLES_PATH.exists():
-        return []
-
-    staged = json.loads(STAGED_TABLES_PATH.read_text(encoding="utf-8"))
-    hospitals = []
-    for record in staged:
-        if record["table_type"] != "hospital_network":
-            continue
-        row = record["row"]
-        name = (row.get("Hospital Name") or "").strip()
-        if not name:
-            continue
-        hospitals.append(
-            {
-                "hospital_name": name,
-                "city": (row.get("Address") or "").split(",")[-2].strip()
-                if "," in (row.get("Address") or "")
-                else None,
-                "insurer": record["insurer"],
-            }
-        )
-    return hospitals
-
-
 def seed_policy_data(store: PolicyDataStore) -> dict[str, int]:
     """Insert sub-limits, waiting periods, co-pays, room rent, and lookups."""
     for row in SUB_LIMITS:
@@ -374,22 +306,12 @@ def seed_policy_data(store: PolicyDataStore) -> dict[str, int]:
         store.add_copayment(**row)
     for row in DEDUCTIBLES:
         store.add_deductible(**row)
-    for row in ROOM_RENT:
-        store.add_room_rent(**row)
-    for name, category in DAY_CARE_PROCEDURES:
-        store.add_day_care_procedure(name, category)
 
-    hospitals = load_staged_hospitals()
-    for hospital in hospitals:
-        store.add_hospital(**hospital)
 
     return {
         "policy_sub_limits": len(SUB_LIMITS),
         "policy_waiting_periods": len(WAITING_PERIODS),
         "policy_copayments": len(COPAYMENTS),
-        "policy_room_rent": len(ROOM_RENT),
-        "day_care_procedures": len(DAY_CARE_PROCEDURES),
-        "network_hospitals": len(hospitals),
     }
 
 
