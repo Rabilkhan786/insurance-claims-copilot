@@ -16,11 +16,20 @@ evaluation/baseline_results.json.
 from __future__ import annotations
 
 import json
+import logging
 import math
 import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+
+from tenacity import (
+    before_sleep_log,
+    retry,
+    retry_if_exception,
+    stop_after_attempt,
+    wait_fixed,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -46,6 +55,23 @@ ANSWER_DELAY_SECONDS = 10
 # window -- 60 seconds clears it.
 RETRY_WAIT_SECONDS = 60
 MAX_RETRIES = 3
+
+
+def _is_rate_limit(error: BaseException) -> bool:
+    """True for a Groq 429, whatever exception type it arrives wrapped in."""
+    text = str(error).lower()
+    return "429" in text or "rate_limit" in text
+
+
+# Both the answer call and the judge call hit the same per-minute cap, so they
+# share one policy instead of each hand-rolling a sleep loop.
+_retry_on_rate_limit = retry(
+    retry=retry_if_exception(_is_rate_limit),
+    stop=stop_after_attempt(MAX_RETRIES),
+    wait=wait_fixed(RETRY_WAIT_SECONDS),
+    before_sleep=before_sleep_log(logging.getLogger(__name__), logging.WARNING),
+    reraise=True,
+)
 
 METRIC_LABELS = {
     "faithfulness": "Faithfulness",
@@ -125,19 +151,7 @@ class _AnswerGenerator:
             ("human", "{question}"),
         ])
         messages = prompt.format_messages(context=context, question=question)
-
-        for attempt in range(MAX_RETRIES):
-            try:
-                return self.model.invoke(messages).content
-            except Exception as exc:
-                if "429" in str(exc) or "rate_limit" in str(exc).lower():
-                    wait = RETRY_WAIT_SECONDS
-                    print(f"  Groq 429 on answer gen (attempt {attempt + 1}/{MAX_RETRIES}), "
-                          f"waiting {wait}s...")
-                    time.sleep(wait)
-                else:
-                    raise
-        return self.model.invoke(messages).content  # final attempt, let it raise
+        return _retry_on_rate_limit(self.model.invoke)(messages).content
 
 
 class _BGELangchainEmbeddings:
@@ -383,34 +397,25 @@ def run_metrics(samples: list) -> dict[str, float]:
             print(f"  Waiting {EVAL_DELAY_SECONDS}s before next call...")
             time.sleep(EVAL_DELAY_SECONDS)
 
-        scored = False
-        for attempt in range(1, MAX_RETRIES + 1):
-            try:
-                scores = _score_one(sample, judge_llm, judge_embeddings, metrics, run_config)
-                for metric in METRIC_LABELS:
-                    accumulated[metric].append(scores.get(metric, float("nan")))
-                # Per-question scores make a single bad question visible
-                # instead of hiding it inside the average.
-                detail = "  ".join(
-                    f"{label}={scores.get(metric, float('nan')):.2f}"
-                    for metric, label in METRIC_LABELS.items()
-                )
-                print(f"  {detail}")
-                scored = True
-                break
-            except Exception as exc:
-                err = str(exc)
-                if "429" in err or "rate_limit" in err.lower():
-                    print(f"  429 rate limit (attempt {attempt}/{MAX_RETRIES}), "
-                          f"waiting {RETRY_WAIT_SECONDS}s...")
-                    time.sleep(RETRY_WAIT_SECONDS)
-                else:
-                    print(f"  Scoring error: {exc}")
-                    break
+        try:
+            scores = _retry_on_rate_limit(_score_one)(
+                sample, judge_llm, judge_embeddings, metrics, run_config
+            )
+            # Per-question scores make a single bad question visible instead
+            # of hiding it inside the average.
+            detail = "  ".join(
+                f"{label}={scores.get(metric, float('nan')):.2f}"
+                for metric, label in METRIC_LABELS.items()
+            )
+            print(f"  {detail}")
+        except Exception as error:
+            # A question that cannot be scored is recorded as nan rather than
+            # dropped, so the summary still says how many were attempted.
+            print(f"  Scoring failed: {error}")
+            scores = {}
 
-        if not scored:
-            for metric in METRIC_LABELS:
-                accumulated[metric].append(float("nan"))
+        for metric in METRIC_LABELS:
+            accumulated[metric].append(scores.get(metric, float("nan")))
 
     def _mean(values: list[float]) -> float:
         valid = [v for v in values if not math.isnan(v)]

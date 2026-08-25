@@ -311,10 +311,12 @@ def test_sum_insured_balance_exposes_deductible_and_copay():
 # ===========================================================================
 # A real indexed policy that has no rows in any policy_* table.
 #
-# This moved from BHAHLIP2014V011920 once scripts/load_staged_tables.py began
-# loading extracted rows: that policy now has a curated cataract sub-limit, so
-# it no longer reaches the fallback these tests exist to cover.
-UNSEEDED_UIN = "ACKPAIP21638V012021"
+# This has moved twice, each time because the policy it named stopped being
+# unseeded: BHAHLIP2014V011920 gained a curated cataract sub-limit once the
+# extracted rows were loaded, and ACKPAIP21638V012021 left the corpus
+# altogether -- its UIN says PAI, a personal accident policy, which does not
+# belong in a health claims tool.
+UNSEEDED_UIN = "SHAHLIP26044V092526"
 
 # Ambulance cover is the sub-limit this policy states in prose rather than in
 # a table, which is exactly the case SQL cannot answer.

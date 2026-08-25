@@ -4,8 +4,9 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-from pathlib import Path
 from uuid import uuid4
+
+from src.utils.sqlite_store import SqliteStore
 
 from .models import SCHEMA
 
@@ -26,23 +27,11 @@ def _ai_decision_from(recommendation: dict) -> str:
     return "approve" if recommendation.get("eligible") else "reject"
 
 
-class DecisionStore:
+class DecisionStore(SqliteStore):
     """Thin CRUD layer over the claim_decisions audit table."""
 
-    def __init__(self, db_path: Path) -> None:
-        self.db_path = Path(db_path)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._init_schema()
-
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.db_path)
-        connection.row_factory = sqlite3.Row
-        return connection
-
-    def _init_schema(self) -> None:
-        with self._connect() as connection:
-            connection.executescript(SCHEMA)
-        logger.info("decisions_schema_ready path=%s", self.db_path)
+    SCHEMA = SCHEMA
+    LABEL = "decisions"
 
     def record(
         self,
