@@ -110,20 +110,18 @@ uv run uvicorn app:app --port 8000
 Endpoints: `POST /chat` (set `"stream": true` for word-by-word output),
 `POST /review-claim`, `POST /submit-decision`, `POST /reset-memory`, `GET /health`.
 
-## How to re-index the 20 PDFs
+## How to index the PDFs
 
-Wipes the Pinecone index and rebuilds it from every PDF in
-`Data/insurance_documents/`:
-
-```bash
-uv run python scripts/reindex.py
-```
-
-To add to the existing index without wiping it:
+Runs the ingestion pipeline over every PDF in `Data/insurance_documents/`
+and upserts the result into Pinecone:
 
 ```bash
 uv run python main.py
 ```
+
+Document IDs hash the chunk's own content, so re-running overwrites the same
+vectors instead of duplicating them. It does not remove vectors belonging to
+a PDF you have deleted -- clear the namespace first if you need that.
 
 ## How to run the evaluation
 
@@ -281,7 +279,6 @@ insurance-rag-chatbot/
     cache/rag_cache.py      TTL cache for retrieval results
     crm/, claims/,
     policy_data/            SQLite models and stores
-  scripts/reindex.py        Wipe Pinecone and rebuild
   evaluation/
     dataset.json            10 labelled questions
     run_ragas.py            The evaluation runner

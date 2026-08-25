@@ -1,8 +1,9 @@
 """Root entry point for the PDF-to-Pinecone indexing workflow.
 
-This now runs the section-aware pipeline (src/ingestion/pipeline.py) rather
-than the old Unstructured title-chunker. To wipe Pinecone first, use
-scripts/reindex.py instead -- this file only adds to what is already there.
+Runs the section-aware pipeline (src/ingestion/pipeline.py) over every PDF
+in Data/insurance_documents/ and upserts the result into Pinecone.
+Upserts are idempotent -- document IDs hash the chunk's own content -- so
+re-running overwrites the same vectors rather than duplicating them.
 """
 from __future__ import annotations
 
