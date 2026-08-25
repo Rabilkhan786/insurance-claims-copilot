@@ -1,108 +1,324 @@
-# Insurance Hybrid RAG Chatbot
+# AI Insurance Claims Copilot
 
-A modular FastAPI application that answers insurance questions using the existing Hybrid RAG pipeline:
+An internal tool that helps insurance **claims employees** analyse health
+insurance claims faster and more accurately. It is not a customer-facing
+chatbot -- customers never touch this system.
 
-`PDF -> Unstructured API -> chunk_by_title() -> filter chunks under 50 characters -> BGE dense retrieval + Pinecone hosted sparse retrieval -> RRF -> BGE cross-encoder reranking -> Groq answer`
+An employee types a claim into a form (customer, amount, treatment, diagnosis,
+hospital, date). The system fetches the policy, runs a deterministic 8-step
+eligibility checklist, retrieves the supporting policy clauses from the real
+PDFs, and shows a **recommendation**: decision, payable amount, reasoning and
+cited evidence. The employee then approves, edits or rejects it. **The AI never
+finalises a claim.** Every recommendation is stored alongside what the employee
+actually decided, so an audit can see both.
 
-Conversation memory is maintained per session with LangChain. Voice requests are transcribed with Whisper and use the same retrieval and answer flow as text chat.
+Every policy fact carries a citation to the insurer, UIN and page it came from,
+and when the documents do not answer something it says so instead of guessing.
 
-## Live deploy
+## What it can do
 
-https://insurance-rag-chatbot-production.up.railway.app/
+- Answers policy questions from 20 real IRDAI health insurance PDFs, citing
+  the insurer, UIN and page for every fact
+- Looks up the analysed customer's policies, claims and remaining cover
+- Works out the exact date a waiting period ends (e.g. "eligible from
+  16 May 2028, 636 days away")
+- Runs an 8-step eligibility checklist on a submitted claim and estimates the
+  payout after sub-limits, co-payment, deductible and remaining sum insured
+- Pauses for human review: the employee approves, edits or rejects, and both
+  the AI recommendation and their decision are written to an audit trail
+- Works for **any** customer holding **any** of the 20 indexed policies — if a
+  policy has no curated database rows, the limits are read out of its wording
+- Refuses to answer from general knowledge when the policy text does not
+  cover the question
+
+## Tech stack
+
+| Layer | Choice |
+|---|---|
+| Language / packaging | Python 3.11, [uv](https://docs.astral.sh/uv/) |
+| Agent | LangChain `create_agent` 1.3.15 (9 tools) |
+| Orchestration | LangGraph 1.2.11 (`StateGraph`, subgraph-as-node, `interrupt()`) |
+| Memory | `SqliteSaver` checkpointer (`data/checkpoints.db`) |
+| LLM | Groq `openai/gpt-oss-120b` |
+| Vector DB | Pinecone 9.1 — dense + sparse hybrid |
+| Embeddings | `BAAI/bge-base-en-v1.5` (768-dim) |
+| Reranker | `BAAI/bge-reranker-base` cross-encoder |
+| Structured data | SQLite (`crm.db`, incl. the `claim_decisions` audit trail) |
+| PDF parsing | PyMuPDF 1.28 |
+| API | FastAPI 0.141 |
+| Frontend | Streamlit 1.61 |
+| Evaluation | RAGAS 0.2.15 |
+
+## Setup
+
+You need Python 3.11+ and [uv](https://docs.astral.sh/uv/getting-started/installation/).
+
+```bash
+uv sync
+```
+
+Evaluation extras (only needed to run RAGAS):
+
+```bash
+uv sync --extra evaluation
+```
+
+Copy the environment template and fill in your keys:
+
+```bash
+cp .env.example .env
+```
+
+`.env` needs:
+
+```
+GROQ_API_KEY=
+CEREBRAS_API_KEY=
+PINECONE_API_KEY=
+PINECONE_INDEX_NAME=
+LANGSMITH_API_KEY=
+LANGCHAIN_API_KEY=
+LANGCHAIN_TRACING_V2=true
+LANGCHAIN_PROJECT=health-insurance-agent
+```
+
+Create and seed the demo databases:
+
+```bash
+uv run python data/seed.py
+```
+
+## How to run
+
+Streamlit is the frontend:
+
+```bash
+uv run streamlit run streamlit_app.py
+```
+
+It opens on http://localhost:8501. Enter a customer ID in the sidebar (the app
+lists whoever is actually in the database), then use the **Chat** tab for
+the claim-entry form, then review the recommendation and approve, edit or
+reject it.
+
+To run the JSON API instead:
+
+```bash
+uv run uvicorn app:app --port 8000
+```
+
+Endpoints: `POST /chat` (set `"stream": true` for word-by-word output),
+`POST /review-claim`, `POST /submit-decision`, `POST /reset-memory`, `GET /health`.
+
+## How to index the PDFs
+
+Runs the ingestion pipeline over every PDF in `Data/insurance_documents/`
+and upserts the result into Pinecone:
+
+```bash
+uv run python main.py
+```
+
+Document IDs hash the chunk's own content, so re-running overwrites the same
+vectors instead of duplicating them. It does not remove vectors belonging to
+a PDF you have deleted -- clear the namespace first if you need that.
+
+## How to run the evaluation
+
+```bash
+uv run python evaluation/run_ragas.py
+```
+
+A 5-question smoke test (one per topic):
+
+```bash
+uv run python evaluation/run_ragas.py --smoke
+```
+
+Scores are written to `evaluation/baseline_results.json`. A full run takes
+roughly 20 minutes because it waits 20 seconds between questions to stay
+inside the Groq free-tier rate limit.
+
+## RAGAS scores
+
+Measured on 2026-08-19 over a 10-question dataset. Answers generated by
+Cerebras gpt-oss-120b, judged by Groq openai/gpt-oss-120b.
+
+Three of the ten questions retrieved nothing and the generator correctly
+abstained, which scores zero on three of the four metrics. Both figures are
+given below, because reporting only one of them would mislead.
+
+**On the questions where retrieval succeeded (6 of 10):**
+
+| Metric | Score |
+|---|---|
+| Faithfulness | **0.83** |
+| Answer relevancy | **0.92** |
+| Context precision | **0.76** |
+| Context recall | **0.83** |
+
+**Across all 10 questions, including the three abstentions:**
+
+| Metric | Score |
+|---|---|
+| Faithfulness | 0.90 |
+| Answer relevancy | 0.55 |
+| Context precision | 0.51 |
+| Context recall | 0.56 |
+
+Per question:
+
+| Question | Faith. | Rel. | Prec. | Recall |
+|---|---|---|---|---|
+| Maternity waiting period (Oriental) | 0.50 | 1.00 | 1.00 | 0.00 |
+| PED waiting period (Arogya Sanjeevani) | 1.00 | 0.89 | 1.00 | 1.00 |
+| Robotic surgery coverage (Navi) | 1.00 | 0.96 | 0.33 | 1.00 |
+| AYUSH coverage (Arogya Sanjeevani) | 1.00 | 0.91 | 1.00 | 1.00 |
+| Cosmetic surgery exclusion (New India) | 1.00 | 0.00 | 0.00 | 0.00 |
+| Adventure sports exclusion (Red Carpet) | 1.00 | 0.00 | 0.00 | 0.00 |
+| Room rent sub-limit (Arogya Sanjeevani) | 0.50 | 0.80 | 0.25 | 1.00 |
+| Cataract sub-limit (Arogya Sanjeevani) | 1.00 | 0.97 | 1.00 | 1.00 |
+| PED comparison (two Star Health plans) | 1.00 | 0.00 | 0.00 | 0.00 |
+| Daily cash allowance across plans (Oriental) | 1.00 | 0.00 | — | — |
+
+Two caveats on the numbers. The Groq judge hit its 200,000 tokens-per-day
+limit part-way through the tenth question, so context precision and recall are
+means over nine questions while faithfulness and answer relevancy are means
+over ten. And faithfulness is the one metric an abstention scores well on — a
+refusal asserts nothing, so it is trivially faithful. That is why the 10-
+question faithfulness (0.90) sits *above* the 6-question figure (0.83): the
+lower number is the more honest measure of the system answering real questions.
+
+### Known limitations, documented for future work
+
+Three questions abstained, from two distinct causes, and neither is fixed:
+
+**Exclusion questions (2 of 10).** The cosmetic-surgery and adventure-sports
+clauses are indexed and carry the correct `exclusion` topic tag, but the
+cross-encoder ranks them below more general clauses from the same document, so
+they never reach the answer generator. Raising `final_top_k` from 5 to 8 and
+enriching the query with exclusion vocabulary were both tried and neither
+recovered the clause. This is a reranking problem, not a routing or tagging
+one, and it needs a different reranker or a lexical boost rather than a config
+change.
+
+**Comparison routing (1 of 10).** The evaluation harness routed every
+`comparison` question to `check_coverage`, which filters Pinecone to the
+`coverage` and `sub_limit` topics. A question comparing two *waiting periods*
+therefore could not reach a `waiting_period` chunk and always abstained, even
+though the clause was indexed and reachable. This has since been fixed:
+comparisons are now routed by the topic the question is really about, and the
+pre-existing-disease comparison retrieves both the 48-month and 12-month
+clauses. **The scores above predate that fix** and have not been re-measured,
+so the real figures should be at least slightly better than what is published
+here. They will be refreshed on the next full run.
+
+## Notes on the evaluation setup
+
+**Two different models, on purpose.** Answers are generated by **Cerebras
+gpt-oss-120b** and graded by **Groq openai/gpt-oss-120b**. If one model both
+wrote and graded the answer it would be marking its own homework, and
+self-grading bias inflates the result. Splitting generation from judging
+across two providers keeps the grade independent.
+
+**Retrieval is routed by question topic**, matching what the live agent does:
+a waiting-period question goes to `check_waiting_period`, an exclusion question
+to `check_exclusion`, coverage and sub-limit questions to `check_coverage`.
+An earlier version sent everything through one generic search and measured a
+retrieval path the product never uses.
+
+**What each metric means, in plain English:**
+
+| Metric | Question it answers |
+|---|---|
+| Faithfulness | Is every statement in the answer actually supported by the retrieved policy text? Catches invented facts. |
+| Answer relevancy | Does the answer address the question that was asked, rather than something adjacent? |
+| Context precision | Of the chunks retrieved, how many were actually relevant? Low precision means noisy retrieval. |
+| Context recall | Did retrieval find everything needed to produce the reference answer? Low recall means the fact was missed. |
+
+**The dataset is 10 questions**, two each for waiting periods, coverage,
+exclusions, sub-limits and plan comparisons. Every question was written from
+the actual PDF text, with the source UIN and page recorded.
 
 ## Project structure
 
-```text
-src/
-  ingestion/      Unstructured PDF loading helpers
-  embeddings/     BAAI/bge-base-en-v1.5 adapter
-  vectorstores/   Separate dense and sparse Pinecone access
-  retrieval/      Dense/sparse orchestration and reciprocal-rank fusion
-  reranker/       BAAI/bge-reranker-base adapter
-  memory/         Session-scoped LangChain memory
-  llm/            Groq answer generation
-  voice/          Whisper transcription
-  services/       Chat application service
-config/           YAML configuration and global settings
-evaluation/       Reproducible retrieval/answer metric scripts
-notebooks/        Original experimentation notebook
-static/           Existing frontend assets
-tests/            Pytest coverage
+```
+insurance-rag-chatbot/
+  app.py                    FastAPI JSON API
+  streamlit_app.py          Streamlit frontend
+  main.py                   Add PDFs to the existing index
+  config/
+    config.yaml             All tunable values
+    settings.py             Typed settings loader
+  Data/
+    insurance_documents/    20 IRDAI policy PDFs
+    seed.py                 Creates and seeds the demo databases
+    crm.db                  Customers, policies, claims, policy tables, audit
+    checkpoints.db          LangGraph conversation memory
+  src/
+    agent/
+      agent.py              Layer 1 - create_agent, 9 tools, Context
+      workflow.py           Layer 2 - StateGraph, claim review + interrupt()
+    tools/                  The 10 @tool functions
+      crm_tools.py          Customer, policies, claims
+      rag_tools.py          Coverage, exclusions, waiting periods
+      calc_tools.py         Deterministic money and date arithmetic
+    eligibility/
+      engine.py             The deterministic 8-step claim checklist
+      parsing.py            Reads rupee amounts and month counts from clauses
+    ingestion/              PDF to chunks and tables
+      page_parser.py        Separates text from tables by bounding box
+      table_classifier.py   Routes each table to SQL / Pinecone / skip
+      table_converter.py    Turns table rows into sentences
+      chunker.py            Section-aware, topic-tagged chunking
+      pipeline.py           Orchestrates a full index run
+    retrieval/              Hybrid dense + sparse + RRF
+    reranker/               Cross-encoder reranking
+    embeddings/             BGE embedder
+    vectorstores/           Pinecone hybrid store
+    cache/rag_cache.py      TTL cache for retrieval results
+    crm/, claims/,
+    policy_data/            SQLite models and stores
+  evaluation/
+    dataset.json            10 labelled questions
+    run_ragas.py            The evaluation runner
+    baseline_results.json   Latest scores
+  tests/                    pytest suite
 ```
 
-## Requirements
+## How it is put together
 
-- Python 3.10+
-- Pinecone, Groq, and Unstructured API keys
-- Docker Desktop only if running the container image
+Two layers, kept separate:
 
-## Local setup
+- **Layer 1** (`src/agent/agent.py`) is LangChain's `create_agent`. It owns the
+  tool-calling loop, parallel tool execution and conversation memory. The
+  customer's ID arrives as runtime `Context` and is injected straight into the
+  customer-scoped tools, so it never appears in the schema the model sees — the
+  model cannot ask for an ID it already has, and cannot read another customer's
+  records.
+- **Layer 2** (`src/agent/workflow.py`) is a LangGraph `StateGraph` routing the
+  two entry paths: a chat question goes straight to the agent, while a submitted
+  claim runs eligibility engine → agent → review pause, which explains
+  the decision the engine already made.
 
-```powershell
-Copy-Item .env.example .env
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-```
+**The LLM never does arithmetic.** Every rupee amount and every date comes from
+a Python function, so the same question always produces the same number.
 
-Set these values in `.env`:
+**Every policy fact lookup is SQL → RAG → safe default.** Curated rows are used
+when they exist; otherwise the number is parsed out of the policy wording; and
+if neither has it, a safe default applies (no sub-limit cap, 0% co-pay, no
+deductible, no waiting period). Nothing is invented, and a customer with an
+uncurated policy still gets a correct, cited answer.
 
-```dotenv
-PINECONE_API_KEY=...
-GROQ_API_KEY=...
-UNSTRUCTURED_API_KEY=...
-```
+## Disclaimer
 
-## Build the indexes
+This is a demo and portfolio project. It is not a licensed insurance product
+and it does not make real insurance decisions.
 
-Place PDF documents in the configured `Data/insurance_documents` directory, then run:
-
-```powershell
-python main.py
-```
-
-The command creates the configured separate Pinecone dense and hosted sparse indexes when absent, assigns matching deterministic IDs to both, and uploads the chunk records.
-
-## Retrieval Top-K settings
-
-`config/config.yaml` controls each retrieval stage independently:
-
-- `dense_top_k: 20` — dense Pinecone results
-- `sparse_top_k: 20` — hosted sparse Pinecone results
-- `rrf_top_k: 10` — fused RRF candidates sent to the cross encoder
-- `final_top_k: 5` — reranked documents sent to the LLM
-
-## Run the API
-
-```powershell
-python app.py
-```
-
-The retained frontend is available at `http://localhost:8000/`, interactive API documentation at `http://localhost:8000/docs`, and health status at `http://localhost:8000/health`.
-
-## API endpoints
-
-- `POST /chat` — JSON body: `{"question": "...", "session_id": "optional"}`
-- `POST /voice-chat` — multipart `audio` file with an optional session ID
-- `POST /reset-memory` — JSON body: `{"session_id": "..."}`
-- `GET /health`
-
-## Docker
-
-Docker Compose is not needed because this project runs as one API container and
-uses managed external services. Build and run the image directly:
-
-```powershell
-docker build -t insurance-rag-chatbot .
-docker run --rm -p 8000:8000 --env-file .env insurance-rag-chatbot
-```
-
-## Validation
-
-```powershell
-python -m pytest tests -q
-python -m evaluation.run
-```
-
-The evaluation module reports Context Precision, Context Recall, Faithfulness, and Answer Relevancy for labelled samples. These are lightweight keyword/token-overlap approximations (see `evaluation/metrics.py`), not LLM-judged RAGAS metrics — treat them as a fast offline sanity check, not a substitute for a real RAGAS evaluation. Use your own labelled retrieval outputs for live quality evaluation.
+- **Eligibility results are estimates**, produced from the supplied policy
+  documents and demo customer records. They are not claim decisions and carry
+  no weight with any insurer.
+- **The customer data is fabricated.** The demo customers, their policies and
+  their claims are all seeded test data.
+- The policy PDFs are real public IRDAI documents, but always confirm anything
+  important against your own policy wording and your insurer.

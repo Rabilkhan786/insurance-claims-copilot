@@ -16,9 +16,9 @@ REQUIRED_SECTIONS = (
     "pinecone",
     "retrieval",
     "chunking",
-    "memory",
-    "voice",
     "api",
+    "table_extraction",
+    "observability",
 )
 
 
@@ -41,24 +41,26 @@ class Settings:
     sparse_model: str
     dense_top_k: int
     sparse_top_k: int
-    rrf_top_k: int
     final_top_k: int
     rrf_k: int
-    chunk_combine_under: int
-    chunk_new_after: int
-    chunk_max_characters: int
-    chunk_min_characters: int
-    memory_max_messages: int
-    voice_model: str
-    voice_language: str
-    voice_sample_rate: int
     api_host: str
     api_port: int
     batch_size: int
+    rag_cache_ttl_seconds: int
+    crm_db_path: Path
+    chunk_strategy: str
+    max_chunk_size: int
+    min_chunk_size: int
+    tag_topics: bool
+    chunk_skip_patterns: tuple[str, ...]
+    table_extraction_enabled: bool
+    table_min_rows: int
+    table_min_cols: int
+    langsmith_tracing: bool
+    langsmith_project: str
     pinecone_api_key: str | None
     groq_api_key: str | None
-    unstructured_api_key: str | None
-    hf_token: str | None
+    langchain_api_key: str | None
 
 
 def _required(mapping: dict[str, Any], key: str) -> Any:
@@ -73,11 +75,102 @@ def _load_yaml_config(root: Path) -> dict[str, Any]:
     config_path = root / "config" / "config.yaml"
     with config_path.open(encoding="utf-8") as file:
         raw = yaml.safe_load(file) or {}
-
     for section in REQUIRED_SECTIONS:
         _required(raw, section)
-
     return raw
+
+
+def _project_kwargs(root: Path, project: dict) -> dict:
+    """Build Settings fields for root/data/artifact paths."""
+    return {
+        "root_dir": root,
+        "data_dir": root / project["data_dir"],
+        "artifacts_dir": root / project["artifacts_dir"],
+    }
+
+
+def _model_kwargs(models: dict) -> dict:
+    """Build Settings fields for embedding, reranker, and LLM model names."""
+    return {
+        "embedding_model": models["embedding"],
+        "cross_encoder_model": models["cross_encoder"],
+        "llm_model": models["llm"],
+        "llm_temperature": float(models["temperature"]),
+    }
+
+
+def _pinecone_kwargs(pinecone: dict) -> dict:
+    """Build Settings fields for Pinecone index configuration."""
+    return {
+        "dense_index_name": pinecone["dense_index"],
+        "sparse_index_name": pinecone["sparse_index"],
+        "namespace": pinecone["namespace"],
+        "pinecone_cloud": pinecone["cloud"],
+        "pinecone_region": pinecone["region"],
+        "dense_dimension": int(pinecone["dense_dimension"]),
+        "dense_metric": pinecone["dense_metric"],
+        "sparse_model": pinecone["sparse_model"],
+    }
+
+
+def _retrieval_kwargs(retrieval: dict) -> dict:
+    """Build Settings fields for hybrid retrieval top-k and RRF parameters."""
+    return {
+        "dense_top_k": int(retrieval["dense_top_k"]),
+        "sparse_top_k": int(retrieval["sparse_top_k"]),
+        "final_top_k": int(retrieval["final_top_k"]),
+        "rrf_k": int(retrieval["rrf_k"]),
+    }
+
+
+def _chunking_kwargs(chunking: dict) -> dict:
+    """Build Settings fields for text chunking strategy and size limits."""
+    return {
+        "chunk_strategy": chunking["strategy"],
+        "max_chunk_size": int(chunking["max_chunk_size"]),
+        "min_chunk_size": int(chunking["min_chunk_size"]),
+        "tag_topics": bool(chunking["tag_topics"]),
+        "chunk_skip_patterns": tuple(chunking["skip_patterns"]),
+    }
+
+
+def _table_kwargs(table_extraction: dict) -> dict:
+    """Build Settings fields for PDF table extraction rules."""
+    return {
+        "table_extraction_enabled": bool(table_extraction["enabled"]),
+        "table_min_rows": int(table_extraction["min_rows"]),
+        "table_min_cols": int(table_extraction["min_cols"]),
+    }
+
+
+def _infra_kwargs(root: Path, raw: dict) -> dict:
+    """Build Settings fields for the API server and database paths."""
+    api = raw["api"]
+    database = raw.get("database", {})
+    cache = raw.get("cache", {})
+    return {
+        "api_host": api["host"],
+        "api_port": int(api["port"]),
+        "batch_size": int(raw["batch_size"]),
+        "rag_cache_ttl_seconds": int(cache.get("rag_ttl_seconds", 3600)),
+        "crm_db_path": root / database.get("crm_path", "data/crm.db"),
+    }
+
+
+def _observability_kwargs(root: Path, raw: dict) -> dict:
+    """Build Settings fields for tracing and API secrets."""
+    observability = raw["observability"]
+    return {
+        "langsmith_tracing": bool(observability["langsmith_tracing"]),
+        "langsmith_project": observability["langsmith_project"],
+        "pinecone_api_key": os.getenv("PINECONE_API_KEY"),
+        "groq_api_key": os.getenv("GROQ_API_KEY"),
+        # LangSmith renamed its env vars from LANGCHAIN_* to LANGSMITH_*;
+        # the langsmith SDK itself accepts either, so this does too.
+        "langchain_api_key": (
+            os.getenv("LANGSMITH_API_KEY") or os.getenv("LANGCHAIN_API_KEY")
+        ),
+    }
 
 
 def load_settings() -> Settings:
@@ -85,52 +178,15 @@ def load_settings() -> Settings:
     root = Path(__file__).resolve().parents[1]
     load_dotenv(root / ".env")
     raw = _load_yaml_config(root)
-
-    project = raw["project"]
-    models = raw["models"]
-    pinecone = raw["pinecone"]
-    retrieval = raw["retrieval"]
-    chunking = raw["chunking"]
-    memory = raw["memory"]
-    voice = raw["voice"]
-    api = raw["api"]
-
     return Settings(
-        root_dir=root,
-        data_dir=root / project["data_dir"],
-        artifacts_dir=root / project["artifacts_dir"],
-        embedding_model=models["embedding"],
-        cross_encoder_model=models["cross_encoder"],
-        llm_model=models["llm"],
-        llm_temperature=float(models["temperature"]),
-        dense_index_name=pinecone["dense_index"],
-        sparse_index_name=pinecone["sparse_index"],
-        namespace=pinecone["namespace"],
-        pinecone_cloud=pinecone["cloud"],
-        pinecone_region=pinecone["region"],
-        dense_dimension=int(pinecone["dense_dimension"]),
-        dense_metric=pinecone["dense_metric"],
-        sparse_model=pinecone["sparse_model"],
-        dense_top_k=int(retrieval["dense_top_k"]),
-        sparse_top_k=int(retrieval["sparse_top_k"]),
-        rrf_top_k=int(retrieval["rrf_top_k"]),
-        final_top_k=int(retrieval["final_top_k"]),
-        rrf_k=int(retrieval["rrf_k"]),
-        chunk_combine_under=int(chunking["combine_text_under_n_chars"]),
-        chunk_new_after=int(chunking["new_after_n_chars"]),
-        chunk_max_characters=int(chunking["max_characters"]),
-        chunk_min_characters=int(chunking["min_characters"]),
-        memory_max_messages=int(memory["max_messages"]),
-        voice_model=voice["model"],
-        voice_language=voice["language"],
-        voice_sample_rate=int(voice["sample_rate"]),
-        api_host=api["host"],
-        api_port=int(api["port"]),
-        batch_size=int(raw["batch_size"]),
-        pinecone_api_key=os.getenv("PINECONE_API_KEY"),
-        groq_api_key=os.getenv("GROQ_API_KEY"),
-        unstructured_api_key=os.getenv("UNSTRUCTURED_API_KEY"),
-        hf_token=os.getenv("HF_TOKEN"),
+        **_project_kwargs(root, raw["project"]),
+        **_model_kwargs(raw["models"]),
+        **_pinecone_kwargs(raw["pinecone"]),
+        **_retrieval_kwargs(raw["retrieval"]),
+        **_chunking_kwargs(raw["chunking"]),
+        **_table_kwargs(raw["table_extraction"]),
+        **_infra_kwargs(root, raw),
+        **_observability_kwargs(root, raw),
     )
 
 

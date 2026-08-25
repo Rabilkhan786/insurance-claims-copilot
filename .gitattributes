@@ -1,0 +1,14 @@
+# Keep line endings consistent regardless of who checks the repo out.
+#
+# WHY: this project is developed on Windows, where a tool that rewrites a
+# file in Python text mode turns LF into CRLF. Git then reports the whole
+# file as rewritten -- a 15-line edit showed up as 392 removed and 385 added
+# lines, which makes a diff impossible to review. Normalising to LF in the
+# repository keeps diffs to the lines that actually changed.
+* text=auto eol=lf
+
+# Binary files git must never touch.
+*.pdf binary
+*.db binary
+*.png binary
+*.jpg binary

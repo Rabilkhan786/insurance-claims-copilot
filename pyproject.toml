@@ -1,0 +1,74 @@
+[project]
+name = "insurance-rag-chatbot"
+version = "0.2.0"
+description = "AI claims copilot: hybrid RAG over IRDAI policy documents, deterministic claim eligibility checks, and human-reviewed recommendations."
+readme = "README.md"
+requires-python = ">=3.10"
+
+dependencies = [
+    # --- API layer ---
+    "fastapi>=0.115.6",
+    "uvicorn>=0.34.0",
+    "pydantic>=2.10.4",
+    "PyYAML>=6.0.2",
+    "python-dotenv>=1.0.1",
+    # --- LLM + agent ---
+    "langchain-core>=0.3.28",
+    "langchain-groq>=0.2.3",
+    "langgraph>=0.2.0",
+    "langsmith>=0.1.0",
+    # --- retrieval ---
+    # torch is declared here only so the CPU-only index below can apply to
+    # it. sentence-transformers pulls it in either way; a uv source override
+    # has no effect on a purely transitive dependency.
+    "torch>=2.0.0",
+    "sentence-transformers>=3.3.1",
+    "pinecone>=5.4.2",
+    # --- document ingestion ---
+    "pymupdf>=1.24.0",
+    "numpy>=1.26.4",
+    "nest-asyncio>=1.6.0",
+    "streamlit>=1.40.0",
+    "langgraph-checkpoint-sqlite>=3.1.1",
+    "langchain>=1.3.0",
+]
+
+[project.optional-dependencies]
+# RAGAS pulls a large evaluation stack -- keep it out of the runtime install.
+# Pinned to 0.2.15: newer 0.4.x pulls in scikit-network, which has no
+# prebuilt wheel for this Python version and fails to compile without
+# Visual C++ Build Tools.
+evaluation = [
+    "ragas==0.2.15",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.4",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# The user's normal Windows temp dir (%TEMP%\pytest-of-<user>) is not
+# writable in this sandboxed environment, so pytest's tmp_path fixture
+# fails with PermissionError. A repo-local temp dir sidesteps that.
+addopts = "--basetemp=.pytest_tmp"
+
+[tool.setuptools]
+packages = ["src", "config"]
+
+# Pull torch from PyTorch's CPU-only index.
+#
+# WHY: torch's default wheels depend on ~19 Linux-only CUDA packages
+# (nvidia-cublas, nvidia-cudnn, nccl, triton, cuda-toolkit ...), several GB
+# in total. Nothing here uses a GPU -- the embedder and the cross-encoder
+# both log "No device provided, using cpu" -- and Windows never installed
+# them anyway because of their platform markers. Without this the Docker
+# image (python:3.14-slim, Linux) downloads every one of them.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }

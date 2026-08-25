@@ -1,4 +1,5 @@
 """Adapters for the existing dense and hosted sparse Pinecone indexes."""
+import time
 from typing import Any
 
 from config import settings
@@ -87,22 +88,28 @@ class PineconeHybridStore:
                     }
                 )
 
-            self.dense_index.upsert(
+            _retry_upsert(self.dense_index.upsert)(
                 vectors=dense_records,
                 namespace=settings.namespace,
             )
-            self.sparse_index.upsert_records(
+            _retry_upsert(self.sparse_index.upsert_records)(
                 namespace=settings.namespace,
                 records=sparse_records,
             )
+            print(f"    upserted {start + len(batch_documents)}/{len(documents)}")
 
-    def dense_search(self, query: str) -> list[dict[str, Any]]:
+    def dense_search(
+        self,
+        query: str,
+        metadata_filter: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
         embedding = self.embedder.embed_query(query)
         response = self.dense_index.query(
             vector=embedding,
             top_k=settings.dense_top_k,
             include_metadata=True,
             namespace=settings.namespace,
+            filter=metadata_filter,
         )
         return [
             {
@@ -113,14 +120,16 @@ class PineconeHybridStore:
             for item in response.matches
         ]
 
-    def sparse_search(self, query: str) -> list[dict[str, Any]]:
-        search_query = {
-            "top_k": settings.sparse_top_k,
-            "inputs": {"text": query},
-        }
+    def sparse_search(
+        self,
+        query: str,
+        metadata_filter: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
         response = self.sparse_index.search(
             namespace=settings.namespace,
-            query=search_query,
+            top_k=settings.sparse_top_k,
+            inputs={"text": query},
+            filter=metadata_filter,
         )
         return [
             {
