@@ -34,6 +34,21 @@ def _add_months(start: date, months: int) -> date:
     return date(year, month, day)
 
 
+def compute_age(date_of_birth: str | date, as_of: str | date) -> int:
+    """Age in whole years at as_of -- the same rule underwriting age uses.
+
+    Subtracting years alone overstates age by one for anyone whose birthday
+    this year has not happened yet by as_of; this steps back a year in that
+    case so someone born 2000-06-15 is still 25 (not 26) on 2026-05-01.
+    """
+    birth = _parse_date(date_of_birth)
+    reference = _parse_date(as_of)
+    age = reference.year - birth.year
+    if (reference.month, reference.day) < (birth.month, birth.day):
+        age -= 1
+    return age
+
+
 # ---------------------------------------------------------------------------
 # 1. Waiting period date math
 # ---------------------------------------------------------------------------

@@ -384,7 +384,7 @@ def test_a_policy_stating_no_copay_is_not_the_same_as_an_unread_policy():
     """
     from src.eligibility.engine import _copay_fact
 
-    fact = _copay_fact(UNSEEDED_UIN, UNSEEDED_TREATMENT)
+    fact = _copay_fact(UNSEEDED_UIN, UNSEEDED_TREATMENT, age=None)
 
     assert fact.status in {NOT_APPLICABLE, FOUND}
     assert fact.is_known

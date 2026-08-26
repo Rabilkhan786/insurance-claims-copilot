@@ -42,10 +42,10 @@ uv run python evaluation/run_ragas.py           # all 10
 uv run python evaluation/run_ragas.py --smoke   # 1 per topic
 ```
 
-Scores are written to `baseline_results.json`. The committed file holds a
-5-question smoke run against the current code — the previous baseline was
-deleted rather than kept, because it had been measured before the retrieval
-fix and no longer described anything in this repository.
+Scores are written to `baseline_results.json`. The committed file holds the
+full 10-question run against the current code — the previous baseline (a
+5-question smoke run predating the retrieval fix) was deleted rather than
+kept, because it no longer described anything in this repository.
 
 `rag_dataset.json` holds two questions for each kind of clause the eligibility
 engine actually reads: waiting periods, coverage, exclusions, sub-limits, and

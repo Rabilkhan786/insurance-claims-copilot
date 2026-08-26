@@ -45,18 +45,17 @@ sys.path.insert(0, str(ROOT))
 DATASET_PATH = ROOT / "evaluation" / "rag_dataset.json"
 BASELINE_PATH = ROOT / "evaluation" / "baseline_results.json"
 
-# Answers and judging both run on gpt-oss-120b, but through Cerebras rather
-# than Groq.
+# Answers and judging both run on gpt-oss-120b through Cerebras.
 #
 # WHY: RAGAS scores one question with roughly fifty calls -- it splits the
 # answer into claims, judges every retrieved chunk separately, and re-derives
-# questions from the answer. Groq's free tier refused 120 of 275 requests on
-# the last attempt, which leaves metrics as nan and makes the average
-# meaningless. Cerebras speaks the same OpenAI protocol, so only the base URL
-# and key change.
+# questions from the answer. That volume of calls needs a provider whose rate
+# limit does not turn most of them into refusals, which is why Cerebras and
+# not a free-tier API. It speaks the same OpenAI protocol, so the model code
+# only needs a base URL and a key.
 #
 # The judge uses a second key so answering and judging draw on separate rate
-# limit buckets, which is how the original 19 August baseline got through.
+# limit buckets, keeping a full run from starving itself partway through.
 EVAL_MODEL = "gpt-oss-120b"
 CEREBRAS_BASE_URL = "https://api.cerebras.ai/v1"
 
@@ -202,7 +201,7 @@ def _truncate_contexts(contexts: list[str]) -> list[str]:
     """Trim contexts so total chars stay under MAX_CONTEXT_CHARS.
 
     Keeps as many full chunks as possible; truncates the last one if needed.
-    This keeps the RAGAS judge prompt inside Groq's context window.
+    This keeps the RAGAS judge prompt inside a safe context size.
     """
     result = []
     total = 0
@@ -302,7 +301,7 @@ def build_ragas_samples(entries: list[dict]) -> list:
     for index, entry in enumerate(entries, start=1):
         print(f"  [{index}/{len(entries)}] {entry['topic']}: {entry['question'][:70]}")
         if index > 1:
-            # Groq's free tier 429s if answers are generated back to back.
+            # Cerebras rate-limits answers generated back to back.
             time.sleep(ANSWER_DELAY_SECONDS)
         answer, contexts = answer_question(
             entry["question"], entry["context_uin"], generator,
@@ -354,8 +353,8 @@ def run_metrics(samples: list) -> dict[str, float]:
     # to convert its own wrapper back into this interface.
     judge_embeddings = LangchainEmbeddingsWrapper(get_embedder())
 
-    # max_workers=1: serialize calls to avoid hammering Groq's free-tier rate
-    # limit. timeout=180: 429 retries wait up to 60s; 180s gives that room.
+    # max_workers=1: serialize calls to avoid hammering Cerebras' rate limit.
+    # timeout=180: 429 retries wait up to 60s; 180s gives that room.
     run_config = RunConfig(max_workers=1, timeout=180)
     metrics = [faithfulness, answer_relevancy, context_precision, context_recall]
 

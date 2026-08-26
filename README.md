@@ -195,13 +195,17 @@ limit.
 RAGAS measures faithfulness, answer relevancy, context precision and context
 recall — retrieval, not decisions.
 
-The committed `baseline_results.json` is a 5-question smoke run (one per
-topic) against the current code: faithfulness 1.00, relevancy 0.64, precision
-0.45, recall 0.60. Read those next to the caveats in
-[evaluation/README.md](evaluation/README.md) — faithfulness of 1.00 partly
-reflects that an abstention asserts nothing, and one of the five questions
-abstained. The previous baseline was deleted rather than kept: it predated the
-retrieval fix below and no longer described this code.
+The committed `baseline_results.json` is the full 10-question run against the
+current code: faithfulness 0.87, relevancy 0.71, precision 0.59, recall 0.70.
+Read those next to the caveats in [evaluation/README.md](evaluation/README.md)
+— three of the ten questions scored 0.00 on relevancy, precision and recall
+(faithfulness stayed 1.00 on all three, since an abstention asserts nothing):
+the Oriental maternity waiting period, the Navi robotic-surgery coverage
+question, and the New India top-up deductible question. The robotic-surgery
+one is the "long questions retrieve worse than short ones" limitation
+described below — `check_coverage("robotic surgery")` finds the clause at
+rank 1, but RAGAS queries with the full question sentence, which does not.
+The other seven scored recall of 1.00.
 
 ### Agent traces — LangSmith
 

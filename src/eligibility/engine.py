@@ -46,6 +46,7 @@ from .facts import (
 from src.policy_data import get_policy_store
 from src.tools.calc_tools import (
     calculate_payable_amount,
+    compute_age,
     compute_sum_insured_balance,
     compute_waiting_period,
 )
@@ -356,7 +357,19 @@ def _sub_limit_fact(policy_uin: str, treatment: str) -> PolicyFact:
 
 
 def _find_applicable_copay(copayments: list[dict], treatment: str) -> dict | None:
-    """Prefer a co-pay row naming this treatment, else fall back to a blanket one."""
+    """Prefer a co-pay row naming this treatment, else fall back to a blanket one.
+
+    copayments is expected to already be narrowed to the customer's age by
+    the caller (get_copayments(age=...)), so every row here is one that
+    genuinely applies -- this only chooses between them by treatment name.
+
+    If two age bands somehow overlap for the same age, this falls through to
+    the first row the store returned. That is deterministic (SQLite returns
+    the same order for the same data every time) but not a considered
+    tie-break -- no policy in this corpus has overlapping bands to make one
+    necessary, and inventing a "narrowest band wins" rule with nothing to
+    test it against would be a guess dressed up as a feature.
+    """
     normalized = treatment.lower().replace("_", " ")
     for row in copayments:
         condition = (row.get("condition") or "").lower()
@@ -368,17 +381,54 @@ def _find_applicable_copay(copayments: list[dict], treatment: str) -> dict | Non
     return copayments[0] if copayments else None
 
 
-def _copay_fact(policy_uin: str, treatment: str) -> PolicyFact:
-    """Resolve the co-pay percentage: SQL, then the wording, then unknown."""
-    copayments = get_policy_store().get_copayments(policy_uin)
+def _age_band_text(row: dict) -> str:
+    """Render a copay row's age band as text, or "" when it has none."""
+    age_min, age_max = row.get("age_min"), row.get("age_max")
+    if age_min is not None and age_max is not None:
+        return f"age {age_min}-{age_max}"
+    if age_min is not None:
+        return f"age {age_min}+"
+    if age_max is not None:
+        return f"age up to {age_max}"
+    return ""
+
+
+def _copay_fact(policy_uin: str, treatment: str, age: int | None) -> PolicyFact:
+    """Resolve the co-pay percentage: SQL, then the wording, then unknown.
+
+    age is the customer's age on the treatment date (None when it could not
+    be determined -- see _customer_age_at_treatment). Some plans set a
+    different percentage by age band (e.g. Future Generali's Health Total:
+    20% at 60-64, rising to 40% at 75+); get_copayments(age=...) narrows to
+    the rows that actually apply at that age. If a plan HAS age bands but the
+    customer's age is unknown, guessing which band applies would be worse
+    than saying so -- that case returns unknown rather than picking one.
+    """
+    store = get_policy_store()
+
+    all_rows = store.get_copayments(policy_uin)
+    is_age_banded = any(
+        row.get("age_min") is not None or row.get("age_max") is not None
+        for row in all_rows
+    )
+    if is_age_banded and age is None:
+        return unknown(
+            "copay",
+            "This plan's co-payment depends on the customer's age, which "
+            "could not be determined from the claim or the customer record.",
+        )
+
+    copayments = store.get_copayments(policy_uin, age=age)
     row = _find_applicable_copay(copayments, treatment)
     if row is not None:
+        band = _age_band_text(row)
         return found(
             "copay",
             row["copay_percent"],
             SOURCE_SQL,
             f"Co-payment of {row['copay_percent']}% on record for "
-            f"'{row.get('condition') or 'all claims'}'.",
+            f"'{row.get('condition') or 'all claims'}'"
+            + (f" ({band})" if band else "") + ".",
         )
 
     hits = check_coverage.invoke({"treatment": "co-payment", "policy_uin": policy_uin})
@@ -498,6 +548,22 @@ def _needs_more_info(
     )
 
 
+def _customer_age_at_treatment(customer_id: str, treatment_date: str | None) -> int | None:
+    """The customer's age on the treatment date, for age-banded co-pay.
+
+    Deliberately the treatment date, not today: a claim assessed weeks after
+    a birthday must still use the age the customer was when they were
+    actually treated. Returns None -- not a guess -- when either the date of
+    birth or the treatment date is missing, since an age-banded rule cannot
+    be resolved without both.
+    """
+    customer = get_crm_store().get_customer(customer_id)
+    date_of_birth = customer.get("date_of_birth") if customer else None
+    if not date_of_birth or not treatment_date:
+        return None
+    return compute_age(date_of_birth, treatment_date)
+
+
 # ---------------------------------------------------------------------------
 # The checklist
 # ---------------------------------------------------------------------------
@@ -586,11 +652,11 @@ def _clause_checks(
 
 def _resolve_deductions(
     policy_uin: str, treatment: str, bill_amount: float, base: list[PolicyFact],
-    evidence: list[dict],
+    evidence: list[dict], age: int | None,
 ) -> tuple[dict | None, list[PolicyFact]]:
     """Steps 6-8. An unresolved fact stops the claim before any arithmetic."""
     sub_limit = _sub_limit_fact(policy_uin, treatment)
-    copay = _copay_fact(policy_uin, treatment)
+    copay = _copay_fact(policy_uin, treatment, age)
     deductible = _deductible_fact(policy_uin)
     facts = [*base, sub_limit, copay, deductible]
 
@@ -677,9 +743,10 @@ def check_eligibility(bill_data: dict, customer_id: str, policy_id: str) -> dict
     if settled:
         return settled
 
+    age = _customer_age_at_treatment(customer_id, bill_data.get("admission_date"))
     unresolved, facts = _resolve_deductions(
         policy["policy_number"], treatment, bill_amount,
-        [coverage, waiting], evidence,
+        [coverage, waiting], evidence, age,
     )
     if unresolved:
         return unresolved
