@@ -11,8 +11,8 @@ from __future__ import annotations
 import logging
 
 from config import settings
-from src.crm import CRMStore
-from src.policy_data import PolicyDataStore
+from src.crm import get_crm_store
+from src.policy_data import get_policy_store
 from src.tools.calc_tools import (
     calculate_payable_amount,
     compute_sum_insured_balance,
@@ -22,24 +22,6 @@ from src.eligibility import parsing
 from src.tools.rag_tools import check_coverage, check_exclusion, check_waiting_period
 
 logger = logging.getLogger(__name__)
-
-_crm_store: CRMStore | None = None
-_policy_store: PolicyDataStore | None = None
-
-
-def _get_crm_store() -> CRMStore:
-    global _crm_store
-    if _crm_store is None:
-        _crm_store = CRMStore(settings.crm_db_path)
-    return _crm_store
-
-
-def _get_policy_store() -> PolicyDataStore:
-    global _policy_store
-    if _policy_store is None:
-        _policy_store = PolicyDataStore(settings.crm_db_path)
-    return _policy_store
-
 
 # Words like "surgery" or "treatment" appear in almost every clause in a
 # policy document, so on their own they identify nothing. Matching on them
@@ -138,7 +120,7 @@ def _check_coverage_and_exclusion(
 
 def _waiting_period_months(policy_uin: str, treatment: str) -> int | None:
     """SQL first, then the policy text, then None (no waiting period known)."""
-    row = _get_policy_store().find_waiting_period(policy_uin, treatment)
+    row = get_policy_store().find_waiting_period(policy_uin, treatment)
     if row is not None:
         return row["waiting_period_months"]
 
@@ -184,7 +166,7 @@ def _check_waiting_period(policy: dict, treatment: str) -> str | None:
 
 def _lookup_sub_limit(policy_uin: str, treatment: str) -> float | None:
     """SQL, then the wording, then None meaning no cap applies."""
-    row = _get_policy_store().find_sub_limit(policy_uin, treatment)
+    row = get_policy_store().find_sub_limit(policy_uin, treatment)
     if row is not None:
         return row["limit_amount"]
 
@@ -205,7 +187,7 @@ def _lookup_sub_limit(policy_uin: str, treatment: str) -> float | None:
 def _lookup_copay(policy_uin: str, treatment: str) -> float | None:
     """SQL, then the wording, then None which the calculator reads as 0%."""
     copay_row = _find_applicable_copay(
-        _get_policy_store().get_copayments(policy_uin), treatment
+        get_policy_store().get_copayments(policy_uin), treatment
     )
     if copay_row is not None:
         return copay_row["copay_percent"]
@@ -224,7 +206,7 @@ def _lookup_copay(policy_uin: str, treatment: str) -> float | None:
 
 def _lookup_deductible(policy_uin: str) -> float:
     """SQL, then the wording, then 0 -- most plans have no deductible."""
-    row = _get_policy_store().find_deductible(policy_uin)
+    row = get_policy_store().find_deductible(policy_uin)
     if row is not None:
         return row["deductible_amount"]
 
@@ -266,7 +248,7 @@ def _get_deduction_context(
 
 def check_eligibility(bill_data: dict, customer_id: str, policy_id: str) -> dict:
     """Run the full eligibility checklist for one bill against one policy."""
-    policy = _get_crm_store().get_policy(policy_id)
+    policy = get_crm_store().get_policy(policy_id)
     if policy is None or policy["customer_id"] != customer_id:
         return {"eligible": False, "rejection_reason": "Policy not found for this customer."}
 

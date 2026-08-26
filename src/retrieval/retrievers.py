@@ -20,6 +20,7 @@ metadata filter that narrows the search still happens Pinecone-side.
 from __future__ import annotations
 
 import logging
+from functools import lru_cache
 from typing import Any
 
 from langchain_classic.retrievers import (
@@ -61,13 +62,18 @@ def _to_documents(hits: list[dict]) -> list[Document]:
     return documents
 
 
-class PineconeDenseRetriever(BaseRetriever):
-    """Semantic half of the hybrid: BGE embeddings against the dense index."""
+class _PineconeRetriever(BaseRetriever):
+    """One half of the hybrid search, wrapping one Pinecone query method.
+
+    Both halves take the same store and the same metadata filter and differ
+    only in which method they call, so the subclass supplies just that name.
+    """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     store: Any
     metadata_filter: dict[str, Any] | None = None
+    search_method: str = "dense_search"
 
     def _get_relevant_documents(
         self,
@@ -75,11 +81,18 @@ class PineconeDenseRetriever(BaseRetriever):
         *,
         run_manager: CallbackManagerForRetrieverRun | None = None,
     ) -> list[Document]:
-        return _to_documents(self.store.dense_search(query, self.metadata_filter))
+        search = getattr(self.store, self.search_method)
+        return _to_documents(search(query, self.metadata_filter))
 
 
-class PineconeSparseRetriever(BaseRetriever):
-    """Lexical half of the hybrid: Pinecone's hosted sparse index.
+class PineconeDenseRetriever(_PineconeRetriever):
+    """Semantic half: BGE embeddings against the dense index."""
+
+    search_method: str = "dense_search"
+
+
+class PineconeSparseRetriever(_PineconeRetriever):
+    """Lexical half: Pinecone's hosted sparse index.
 
     This is used instead of the book's in-memory BM25Retriever because the
     corpus already lives in Pinecone -- rebuilding a BM25 index in the API
@@ -87,41 +100,22 @@ class PineconeSparseRetriever(BaseRetriever):
     actually indexed.
     """
 
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    store: Any
-    metadata_filter: dict[str, Any] | None = None
-
-    def _get_relevant_documents(
-        self,
-        query: str,
-        *,
-        run_manager: CallbackManagerForRetrieverRun | None = None,
-    ) -> list[Document]:
-        return _to_documents(self.store.sparse_search(query, self.metadata_filter))
+    search_method: str = "sparse_search"
 
 
-_store: PineconeHybridStore | None = None
-_reranker: CrossEncoderReranker | None = None
-
-
+@lru_cache(maxsize=1)
 def get_store() -> PineconeHybridStore:
     """Return the shared Pinecone store, building it once per process."""
-    global _store
-    if _store is None:
-        _store = PineconeHybridStore(BGEEmbedder())
-    return _store
+    return PineconeHybridStore(BGEEmbedder())
 
 
+@lru_cache(maxsize=1)
 def get_reranker() -> CrossEncoderReranker:
     """Return the shared cross-encoder, loading its weights once per process."""
-    global _reranker
-    if _reranker is None:
-        _reranker = CrossEncoderReranker(
-            model=HuggingFaceCrossEncoder(model_name=settings.cross_encoder_model),
-            top_n=settings.final_top_k,
-        )
-    return _reranker
+    return CrossEncoderReranker(
+        model=HuggingFaceCrossEncoder(model_name=settings.cross_encoder_model),
+        top_n=settings.final_top_k,
+    )
 
 
 def build_retriever(metadata_filter: dict[str, Any] | None = None):

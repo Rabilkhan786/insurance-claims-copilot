@@ -115,7 +115,9 @@ def test_sum_insured_balance_returns_correct_remaining_amount(tmp_path, monkeypa
         "CLM-A3", "A1", "POL-A1", "hospitalization", 999999,
         "2026-02-01", status="rejected",
     )
-    monkeypatch.setattr(calc_tools, "_crm_store", store)
+    # The store is reached through a cached accessor, so the accessor is what
+    # gets swapped -- setting a module global would leave the cache in place.
+    monkeypatch.setattr(calc_tools, "get_crm_store", lambda: store)
 
     result = calc_tools.compute_sum_insured_balance("POL-A1", "A1")
 
