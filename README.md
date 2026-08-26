@@ -33,7 +33,7 @@ claim ─▶ SQL: customer, policy, claim history
 | **LangChain** (`create_agent`) | Tool calling: the agent chooses which lookups to run and writes the explanation an employee reads. |
 | **LangGraph** (`StateGraph`) | The stateful claim workflow, and the `interrupt()` that pauses it for human review and resumes it on the same thread. |
 | **The human** | The decision. Always. |
-| **Evaluation** | pytest, checking every claim's status and payable amount against a labelled dataset. |
+| **Evaluation** | pytest for claim correctness (exact numbers); RAGAS for retrieval quality. |
 
 The split between the engine and the model is the design decision the whole
 project turns on. The model is good at reading a clause and explaining a
@@ -86,7 +86,7 @@ nobody ever established.
 | PDF parsing | PyMuPDF |
 | API | FastAPI |
 | Frontend | Streamlit |
-| Evaluation | pytest (claim correctness) |
+| Evaluation | pytest (claim correctness) + RAGAS (retrieval) |
 
 ## Setup
 
@@ -153,6 +153,10 @@ any change to how chunks are tagged, because tags are baked in at index time.
 
 ## Evaluation
 
+Two separate things are measured, because they fail in different ways.
+
+### Claim correctness — pytest
+
 `evaluation/claims_dataset.json` holds 15 labelled claims covering sub-limits,
 co-pays, deductibles, waiting periods, exclusions, an exhausted sum insured, a
 lapsed policy, a customer/policy mismatch, and both kinds of
@@ -163,8 +167,31 @@ uv run pytest tests/test_claims_evaluation.py -v
 ```
 
 A payable amount is either right or wrong, so it is checked with `==`. No LLM
-judge is involved in scoring money or dates — see
-[evaluation/README.md](evaluation/README.md) for why.
+judge is involved in scoring money or dates.
+
+### Retrieval quality — RAGAS
+
+`evaluation/rag_dataset.json` holds 10 policy-evidence questions, two each for
+waiting periods, coverage, exclusions, sub-limits, and co-pay/deductible
+wording. Every question was written from the actual PDF text with its UIN and
+page recorded.
+
+```bash
+uv sync --extra evaluation
+uv run python evaluation/run_ragas.py           # full run
+uv run python evaluation/run_ragas.py --smoke   # 1 per topic
+```
+
+One model does both jobs -- Groq's `gpt-oss-120b`, the same model and the
+same `GROQ_API_KEY` the live app already uses, so this measures the model
+actually shipped rather than a separate one brought in just to grade. Scores
+are written to `evaluation/baseline_results.json`. A full run takes roughly
+20 minutes: it spaces calls out to stay inside Groq's rate limit.
+
+RAGAS measures faithfulness, answer relevancy, context precision and context
+recall — retrieval, not decisions. Read the scores next to the caveats in
+[evaluation/README.md](evaluation/README.md), especially that judging its own
+answers means self-grading bias can inflate them.
 
 ## Known limitations
 
@@ -257,6 +284,8 @@ health-agentic-rag/
     utils/sqlite_store.py     Shared connection and schema bootstrap
   evaluation/
     claims_dataset.json       15 labelled claims - the correctness benchmark
+    rag_dataset.json          10 policy-evidence questions
+    run_ragas.py              The RAGAS runner (Groq, both roles)
   tests/
 ```
 

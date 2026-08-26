@@ -33,10 +33,23 @@ dependencies = [
     "torch>=2.0.0",
     "sentence-transformers>=3.3.1",
     "pinecone>=5.4.2",
-    # Retry policy for Pinecone upserts. Replaces a hand-written sleep loop.
+    # Retry policy for Pinecone upserts and for the evaluation runner's
+    # rate-limited calls. Replaces two hand-written sleep loops.
     "tenacity>=8.0.0",
     # --- document ingestion ---
     "pymupdf>=1.24.0",
+]
+
+[project.optional-dependencies]
+# RAGAS pulls a large evaluation stack -- keep it out of the runtime install.
+# Pinned to 0.2.15: newer 0.4.x pulls in scikit-network, which has no
+# prebuilt wheel for this Python version and fails to compile without
+# Visual C++ Build Tools.
+evaluation = [
+    "ragas==0.2.15",
+    # The answer and judge models are ChatGroq, already a core dependency --
+    # RAGAS 0.2.15 needs nest-asyncio patched out regardless of provider.
+    "nest-asyncio>=1.6.0",
 ]
 
 [dependency-groups]
