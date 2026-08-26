@@ -2,15 +2,20 @@
 
 Run it with:  uv run python data/seed.py
 
-Four customers are hand-designed to cover the four scenarios the eligibility
-engine (Prompt 3) has to handle correctly:
+Five customers are hand-designed to cover the scenarios the eligibility
+engine has to handle correctly:
 
-    CUST001  happy path                  -- claim well within cover, approved
+    CUST001  happy path                  -- claim well within cover
     CUST002  waiting period not complete -- maternity claimed too early
     CUST003  sum insured nearly exhausted -- most of the cover already used
-    CUST004  rejected claim              -- treatment is on the exclusion list
+    CUST004  exclusion + deductible      -- top-up plan, cosmetic claim
+    CUST005  lapsed policy               -- expired before the treatment date
+             + unindexed policy          -- on file, wording never loaded
 
-Their policies reference REAL UINs pulled from the 20 PDFs in
+These are the ground truth behind evaluation/claims_dataset.json, so a change
+here has to be reflected there.
+
+Their policies reference REAL UINs pulled from the PDFs in
 Data/insurance_documents/, and the policy_data facts below (sub-limits,
 waiting periods, co-payments, deductibles) are transcribed from those same
 PDFs rather than invented, so a citation like "UIN SHAHLIP22027V032122,
@@ -65,6 +70,14 @@ CUSTOMERS = [
         "phone": "+91-98200-44444",
         "date_of_birth": "1981-03-22",
         "address": "45 Marine Drive Society, Kochi, Kerala",
+    },
+    {
+        "customer_id": "CUST005",
+        "name": "Meera Krishnan",
+        "email": "meera.krishnan@example.com",
+        "phone": "+91-98200-55555",
+        "date_of_birth": "1987-11-08",
+        "address": "12 Jubilee Hills Road No 5, Hyderabad, Telangana",
     },
 ]
 
@@ -124,6 +137,38 @@ POLICIES = [
         "premium": 6200,
         "start_date": "2025-11-01",
         "end_date": "2026-10-31",
+        "status": "active",
+    },
+    {
+        # LAPSED POLICY -- same Star Health product as CUST001, but this one
+        # expired and was not renewed. Nothing after step 2 of the checklist
+        # should ever run for a claim on it, whatever the treatment is.
+        "policy_id": "POL005",
+        "customer_id": "CUST005",
+        "policy_number": "SHAHLIP22027V032122",
+        "policy_type": "individual",
+        "policy_name": "Star Health Arogya Sanjeevani Policy",
+        "sum_insured": 300000,
+        "premium": 7200,
+        "start_date": "2024-06-01",
+        "end_date": "2025-05-31",
+        "status": "expired",
+    },
+    {
+        # WORDING NOT INDEXED -- a real operational case, not a broken row.
+        # The policy is on file in the CRM, but nobody ever loaded its PDF, so
+        # this UIN retrieves nothing. Every claim on it must come back as
+        # needs_more_info: with no clause to read, "no exclusion was found" is
+        # not a reason to pay, and it is not a reason to reject either.
+        "policy_id": "POL006",
+        "customer_id": "CUST005",
+        "policy_number": "NOTINDEXED0000V000000",
+        "policy_type": "individual",
+        "policy_name": "Unindexed Demo Policy (wording not loaded)",
+        "sum_insured": 400000,
+        "premium": 9100,
+        "start_date": "2026-01-01",
+        "end_date": "2026-12-31",
         "status": "active",
     },
 ]

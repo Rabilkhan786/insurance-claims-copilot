@@ -1,10 +1,40 @@
-"""Adapters for the existing dense and hosted sparse Pinecone indexes."""
-import time
+"""Adapters for the existing dense and hosted sparse Pinecone indexes.
+
+WHY this is not langchain-pinecone's PineconeVectorStore: that class covers
+one dense index, and this project runs two indexes of different kinds. The
+sparse half is a Pinecone *hosted* sparse index -- created with
+create_index_for_model() and queried with search(inputs={"text": ...}), so
+Pinecone does the sparse encoding server-side. The official integration has
+no route to that API, so adopting it would mean dropping the lexical half of
+hybrid retrieval, or rebuilding a BM25 index in the API process on every
+boot and letting it drift from what was actually indexed.
+
+Everything above this layer *is* framework code: the two thin retrievers in
+src/retrieval/retrievers.py wrap these methods as LangChain BaseRetrievers,
+and EnsembleRetriever and CrossEncoderReranker take it from there. This
+module is only the part the framework does not reach.
+"""
+import logging
 from typing import Any
+
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 from config import settings
 
 from .document_ids import document_id
+
+logger = logging.getLogger(__name__)
+
+# Pinecone rejects an upsert with a 5xx or a timeout often enough over a
+# multi-thousand-vector run that one failure should not lose the batch.
+# tenacity owns the backoff -- the hand-written sleep loop this replaced was
+# deleted in a refactor while its call sites stayed, which left the whole
+# indexing path raising NameError on the first upsert.
+_retry_upsert = retry(
+    stop=stop_after_attempt(4),
+    wait=wait_exponential(multiplier=2, min=2, max=30),
+    reraise=True,
+)
 
 
 class PineconeHybridStore:
@@ -55,7 +85,11 @@ class PineconeHybridStore:
         self.sparse_index = self.client.Index(settings.sparse_index_name)
 
     def index_documents(self, documents: list) -> None:
-        """Upsert matching document IDs into the two independent indexes."""
+        """Upsert matching document IDs into the two independent indexes.
+
+        embed_documents returns plain lists of floats (the LangChain
+        Embeddings contract), which is already what Pinecone's upsert wants.
+        """
         texts = [document.page_content for document in documents]
         embeddings = self.embedder.embed_documents(texts)
 
@@ -76,7 +110,7 @@ class PineconeHybridStore:
                 dense_records.append(
                     {
                         "id": identifier,
-                        "values": embedding.tolist(),
+                        "values": list(embedding),
                         "metadata": metadata,
                     }
                 )

@@ -1,27 +1,62 @@
 """Deterministic claim eligibility checklist.
 
 WHY this exists: an LLM asked "is this claim eligible" will happily give a
-plausible-sounding but wrong answer. This engine runs the same 8-step
-checklist a human claims assessor would, using only SQL lookups, RAG
-citations, and arithmetic -- the LLM is only ever handed the finished
-result to explain in plain language, never asked to decide it.
+plausible-sounding but wrong answer. This engine runs the same checklist a
+human claims assessor would, using only SQL lookups, RAG citations and
+arithmetic -- the LLM is only ever handed the finished result to explain,
+never asked to decide it.
+
+The checklist, in order:
+
+     1. customer owns this policy       6. resolve sub-limit
+     2. policy is active and in force   7. resolve co-pay
+     3. exclusion                       8. resolve deductible
+     4. coverage evidence               9. resolve remaining sum insured
+     5. waiting period                 10. calculate payable
+                                       11. return a structured result
+
+It answers with one of three states, never a bare yes/no:
+
+    eligible         covered, and every condition that applies was checked
+    ineligible       an exclusion, a waiting period or an inactive policy
+    needs_more_info  a fact the decision depends on could not be established
+
+That third state is the point. "No exclusion clause matched" is not evidence
+that a treatment is covered, and an empty co-pay lookup is not evidence that
+the co-pay is zero. Anything the engine could not establish is named in
+missing_information and handed to the employee to chase, rather than being
+filled in with a default that happens to favour one answer.
 """
 from __future__ import annotations
 
 import logging
+import re
 
-from config import settings
 from src.crm import get_crm_store
+from . import parsing
+from .facts import (
+    FOUND,
+    SOURCE_SQL,
+    SOURCE_WORDING,
+    PolicyFact,
+    found,
+    not_applicable,
+    unknown,
+)
 from src.policy_data import get_policy_store
 from src.tools.calc_tools import (
     calculate_payable_amount,
     compute_sum_insured_balance,
     compute_waiting_period,
 )
-from src.eligibility import parsing
 from src.tools.rag_tools import check_coverage, check_exclusion, check_waiting_period
 
 logger = logging.getLogger(__name__)
+
+# The three answers the engine can give.
+ELIGIBLE = "eligible"
+INELIGIBLE = "ineligible"
+NEEDS_MORE_INFO = "needs_more_info"
 
 # Words like "surgery" or "treatment" appear in almost every clause in a
 # policy document, so on their own they identify nothing. Matching on them
@@ -65,6 +100,261 @@ def _mentions_treatment(text: str, treatment: str) -> bool:
     return all(word in lowered_text for word in words)
 
 
+# ---------------------------------------------------------------------------
+# Step 1-2: the policy itself
+# ---------------------------------------------------------------------------
+def _check_policy_in_force(policy: dict, treatment_date: str | None) -> str | None:
+    """Return why the policy cannot pay, or None if it is in force.
+
+    The treatment date matters as much as the status flag: a policy that is
+    active today did not necessarily cover a treatment given last year, and
+    paying on an out-of-period date is one of the mistakes this checklist
+    exists to catch.
+    """
+    if policy["status"] != "active":
+        return f"Policy status is '{policy['status']}', not active."
+
+    if not treatment_date:
+        return None
+
+    date_only = str(treatment_date)[:10]
+    if date_only < str(policy["start_date"])[:10]:
+        return (
+            f"Treatment date {date_only} is before the policy start date "
+            f"{str(policy['start_date'])[:10]}."
+        )
+    if date_only > str(policy["end_date"])[:10]:
+        return (
+            f"Treatment date {date_only} is after the policy end date "
+            f"{str(policy['end_date'])[:10]}."
+        )
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Step 3: exclusion
+# ---------------------------------------------------------------------------
+def _check_exclusion(treatment: str, policy_uin: str) -> tuple[bool, list[dict]]:
+    """Return whether an exclusion clause names this treatment, and the clauses.
+
+    Every retrieved exclusion clause is checked, not just the top few: an
+    exclusion is the strongest finding the engine can make, so one ranked
+    further down would otherwise be missed and the claim wrongly approved.
+    """
+    hits = check_exclusion.invoke({"treatment": treatment, "policy_uin": policy_uin})
+    excluded = [hit for hit in hits if _mentions_treatment(hit["text"], treatment)]
+    return bool(excluded), excluded[:2]
+
+
+# ---------------------------------------------------------------------------
+# Step 4: coverage evidence
+# ---------------------------------------------------------------------------
+# An indemnity health policy grants cover for hospitalisation in general, then
+# names what it excludes, caps or defers. It does not enumerate the procedures
+# it covers -- "appendectomy" appears nowhere in most wordings.
+#
+# So requiring the treatment to be named by name is not the safe reading, it is
+# just a different wrong one: it parks ordinary, plainly covered claims as
+# needs_more_info, which is the mirror image of the bug this rewrite set out to
+# fix. What the engine needs is a clause that actually grants cover for what
+# this claim is. These patterns match that grant.
+#
+# This is still positive evidence -- a retrieved clause saying the policy pays
+# hospitalisation expenses -- and not the absence of a contrary clause, which
+# is the distinction the whole three-state model turns on.
+BASE_COVER_PATTERNS = (
+    re.compile(r"hospitali[sz]ation expenses", re.I),
+    re.compile(r"in-?patient (care|treatment|hospitali)", re.I),
+    re.compile(r"medical expenses.{0,80}hospitali", re.I | re.S),
+    re.compile(r"shall (indemnify|pay|reimburse).{0,120}hospitali", re.I | re.S),
+    re.compile(r"expenses.{0,60}incurred.{0,60}hospitali", re.I | re.S),
+)
+
+
+def _grants_base_cover(text: str) -> bool:
+    """True when a clause grants the policy's general hospitalisation cover."""
+    return any(pattern.search(text or "") for pattern in BASE_COVER_PATTERNS)
+
+
+def _check_coverage(treatment: str, policy_uin: str) -> PolicyFact:
+    """Establish that the policy positively covers this treatment.
+
+    Three kinds of evidence, strongest first: a curated record naming the
+    treatment, a clause naming it, or the policy's base hospitalisation grant.
+    If none of the three is there -- which means retrieval came back with
+    nothing usable for this plan at all -- coverage is UNKNOWN and the claim
+    goes to the employee. "No exclusion matched" is never one of the three.
+    """
+    store = get_policy_store()
+
+    # A curated sub-limit row is a positive statement that the plan pays for
+    # this treatment, and it is stronger evidence than any retrieved clause.
+    sql_row = store.find_sub_limit(policy_uin, treatment)
+    if sql_row is not None:
+        return found(
+            "coverage",
+            True,
+            SOURCE_SQL,
+            f"'{treatment}' has a sub-limit on record, so the plan covers it.",
+        )
+
+    hits = check_coverage.invoke({"treatment": treatment, "policy_uin": policy_uin})
+
+    naming = [hit for hit in hits if _mentions_treatment(hit["text"], treatment)]
+    if naming:
+        return found(
+            "coverage",
+            True,
+            SOURCE_WORDING,
+            f"The wording names '{treatment}' as covered.",
+            evidence=naming[:2],
+        )
+
+    granting = [hit for hit in hits if _grants_base_cover(hit["text"])]
+    if granting:
+        return found(
+            "coverage",
+            True,
+            SOURCE_WORDING,
+            f"'{treatment}' is not named individually, but this plan's "
+            f"hospitalisation cover applies to it. Confirm the admission was "
+            f"in-patient.",
+            evidence=granting[:2],
+        )
+
+    return unknown(
+        "coverage",
+        f"No clause granting cover could be retrieved for this plan, so "
+        f"whether '{treatment}' is covered is unestablished.",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Step 5: waiting period
+# ---------------------------------------------------------------------------
+def _waiting_period_fact(policy_uin: str, treatment: str) -> PolicyFact:
+    """Resolve the waiting period: SQL, then the wording, then unknown.
+
+    A curated schedule that lists other conditions but not this one is real
+    evidence that this treatment has no waiting period -- that is
+    NOT_APPLICABLE, not UNKNOWN. Retrieving nothing at all is UNKNOWN.
+    """
+    store = get_policy_store()
+
+    row = store.find_waiting_period(policy_uin, treatment)
+    if row is not None:
+        return found(
+            "waiting_period",
+            row["waiting_period_months"],
+            SOURCE_SQL,
+            f"{row['waiting_period_months']}-month waiting period on record "
+            f"for '{row.get('condition') or treatment}'.",
+        )
+
+    on_record = store.get_waiting_periods(policy_uin)
+    if on_record:
+        listed = ", ".join(r["condition"] for r in on_record if r.get("condition"))
+        return not_applicable(
+            "waiting_period",
+            f"This plan's waiting-period schedule covers {listed} and does not "
+            f"list '{treatment}'.",
+        )
+
+    terms = _specific_terms(treatment)
+    hits = check_waiting_period.invoke(
+        {"condition": treatment, "policy_uin": policy_uin}
+    )
+
+    for term in terms:
+        months, hit = parsing.first_match(
+            hits, parsing.parse_waiting_period_months, keyword=term
+        )
+        if months is not None:
+            logger.info(
+                "waiting_period_from_rag uin=%s treatment=%r months=%s page=%s",
+                policy_uin, treatment, months, (hit or {}).get("page"),
+            )
+            return found(
+                "waiting_period",
+                months,
+                SOURCE_WORDING,
+                f"The wording states a {months}-month waiting period for "
+                f"'{treatment}'.",
+                evidence=[hit] if hit else [],
+            )
+
+    if hits and terms:
+        return not_applicable(
+            "waiting_period",
+            f"The plan's waiting-period clauses do not name '{treatment}'.",
+        )
+
+    return unknown(
+        "waiting_period",
+        f"No waiting-period clause could be read for this plan, so whether "
+        f"'{treatment}' has one is unestablished.",
+    )
+
+
+def _waiting_period_breach(policy: dict, fact: PolicyFact) -> str | None:
+    """Return why the waiting period blocks the claim, or None if it does not."""
+    if fact.status != FOUND:
+        return None
+
+    tracker = compute_waiting_period(policy["start_date"], fact.value)
+    if tracker["is_eligible"]:
+        return None
+    return (
+        f"Waiting period of {fact.value} months is not yet complete. "
+        f"Cover begins {tracker['eligible_date']}."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Steps 6-8: the deduction facts
+# ---------------------------------------------------------------------------
+def _sub_limit_fact(policy_uin: str, treatment: str) -> PolicyFact:
+    """Resolve the sub-limit: SQL, then the wording, then unknown."""
+    row = get_policy_store().find_sub_limit(policy_uin, treatment)
+    if row is not None:
+        return found(
+            "sub_limit",
+            row["limit_amount"],
+            SOURCE_SQL,
+            f"Sub-limit of Rs {row['limit_amount']:,.0f} on record for "
+            f"'{row.get('treatment') or treatment}'.",
+        )
+
+    hits = check_coverage.invoke({"treatment": treatment, "policy_uin": policy_uin})
+    for term in _specific_terms(treatment):
+        amount, hit = parsing.first_match(hits, parsing.parse_rupee_amount, keyword=term)
+        if amount is not None:
+            logger.info(
+                "sub_limit_from_rag uin=%s treatment=%r amount=%s page=%s",
+                policy_uin, treatment, amount, (hit or {}).get("page"),
+            )
+            return found(
+                "sub_limit",
+                amount,
+                SOURCE_WORDING,
+                f"The wording caps '{treatment}' at Rs {amount:,.0f}.",
+                evidence=[hit] if hit else [],
+            )
+
+    if hits:
+        return not_applicable(
+            "sub_limit",
+            f"No clause caps '{treatment}', so the full bill is considered up "
+            f"to the sum insured.",
+        )
+
+    return unknown(
+        "sub_limit",
+        f"No coverage wording could be retrieved, so any cap on '{treatment}' "
+        f"is unestablished.",
+    )
+
+
 def _find_applicable_copay(copayments: list[dict], treatment: str) -> dict | None:
     """Prefer a co-pay row naming this treatment, else fall back to a blanket one."""
     normalized = treatment.lower().replace("_", " ")
@@ -78,141 +368,58 @@ def _find_applicable_copay(copayments: list[dict], treatment: str) -> dict | Non
     return copayments[0] if copayments else None
 
 
-def _check_policy_active(policy: dict) -> str | None:
-    """Step 1: reject outright if the policy itself is not active."""
-    if policy["status"] != "active":
-        return f"Policy status is '{policy['status']}', not active."
-    return None
-
-
-def _check_coverage_and_exclusion(
-    treatment: str,
-    policy_uin: str,
-) -> tuple[str | None, list[dict]]:
-    """Steps 2-3: an explicit exclusion rejects the claim; nothing else does.
-
-    These policies cover hospitalisation in general and name only what they
-    exclude or cap -- there is no exhaustive list of covered procedures. The
-    old rule ("reject unless a coverage clause names the treatment") therefore
-    rejected ordinary claims: an appendectomy is covered but never mentioned
-    by name anywhere in the wording. Sub-limit, co-pay, waiting-period and
-    sum-insured checks still run after this, so a claim is not waved through.
-    """
-    exclusion_hits = check_exclusion.invoke({"treatment": treatment, "policy_uin": policy_uin})
-
-    # Every exclusion clause is checked, not just the first two. An exclusion
-    # is now the only thing that can reject a claim, so one ranked further
-    # down the list would otherwise be missed and the claim wrongly approved.
-    excluded = [
-        hit for hit in exclusion_hits if _mentions_treatment(hit["text"], treatment)
-    ]
-    if excluded:
-        return f"'{treatment}' appears in the policy's exclusion list.", excluded[:2]
-
-    # Not excluded, so it is covered. Prefer a clause that names the treatment
-    # for the citation, otherwise cite the nearest coverage clauses.
-    coverage_hits = check_coverage.invoke({"treatment": treatment, "policy_uin": policy_uin})
-    naming = [
-        hit for hit in coverage_hits if _mentions_treatment(hit["text"], treatment)
-    ]
-    return None, (naming or coverage_hits)[:2]
-
-
-def _waiting_period_months(policy_uin: str, treatment: str) -> int | None:
-    """SQL first, then the policy text, then None (no waiting period known)."""
-    row = get_policy_store().find_waiting_period(policy_uin, treatment)
+def _copay_fact(policy_uin: str, treatment: str) -> PolicyFact:
+    """Resolve the co-pay percentage: SQL, then the wording, then unknown."""
+    copayments = get_policy_store().get_copayments(policy_uin)
+    row = _find_applicable_copay(copayments, treatment)
     if row is not None:
-        return row["waiting_period_months"]
-
-    # The clause must name this treatment. Without that guard a cataract bill
-    # picked up the 48-month pre-existing-disease period from a neighbouring
-    # clause and was wrongly rejected.
-    terms = _specific_terms(treatment)
-    if not terms:
-        return None
-
-    hits = check_waiting_period.invoke(
-        {"condition": treatment, "policy_uin": policy_uin}
-    )
-    for term in terms:
-        months, hit = parsing.first_match(
-            hits, parsing.parse_waiting_period_months, keyword=term
+        return found(
+            "copay",
+            row["copay_percent"],
+            SOURCE_SQL,
+            f"Co-payment of {row['copay_percent']}% on record for "
+            f"'{row.get('condition') or 'all claims'}'.",
         )
-        if months is not None:
-            logger.info(
-                "waiting_period_from_rag uin=%s treatment=%r months=%s page=%s",
-                policy_uin, treatment, months, (hit or {}).get("page"),
-            )
-            return months
-    return None
 
-
-def _check_waiting_period(policy: dict, treatment: str) -> str | None:
-    """Step 4: only blocks the claim if a waiting period can be established."""
-    months = _waiting_period_months(policy["policy_number"], treatment)
-    if months is None:
-        # Safe default: nothing on record in SQL or in the wording, so no
-        # waiting period is applied rather than inventing one.
-        return None
-
-    tracker = compute_waiting_period(policy["start_date"], months)
-    if not tracker["is_eligible"]:
-        return (
-            f"Waiting period for '{treatment}' is not yet complete. "
-            f"Eligible from {tracker['eligible_date']}."
-        )
-    return None
-
-
-def _lookup_sub_limit(policy_uin: str, treatment: str) -> float | None:
-    """SQL, then the wording, then None meaning no cap applies."""
-    row = get_policy_store().find_sub_limit(policy_uin, treatment)
-    if row is not None:
-        return row["limit_amount"]
-
-    # The clause has to name the treatment, otherwise any rupee figure on the
-    # page would be mistaken for this treatment's cap.
-    hits = check_coverage.invoke({"treatment": treatment, "policy_uin": policy_uin})
-    for term in _specific_terms(treatment):
-        amount, hit = parsing.first_match(hits, parsing.parse_rupee_amount, keyword=term)
-        if amount is not None:
-            logger.info(
-                "sub_limit_from_rag uin=%s treatment=%r amount=%s page=%s",
-                policy_uin, treatment, amount, (hit or {}).get("page"),
-            )
-            return amount
-    return None
-
-
-def _lookup_copay(policy_uin: str, treatment: str) -> float | None:
-    """SQL, then the wording, then None which the calculator reads as 0%."""
-    copay_row = _find_applicable_copay(
-        get_policy_store().get_copayments(policy_uin), treatment
-    )
-    if copay_row is not None:
-        return copay_row["copay_percent"]
-
-    hits = check_coverage.invoke(
-        {"treatment": "co-payment", "policy_uin": policy_uin}
-    )
+    hits = check_coverage.invoke({"treatment": "co-payment", "policy_uin": policy_uin})
     percent, hit = parsing.first_match(hits, parsing.parse_percent, keyword="co-pay")
     if percent is not None:
         logger.info(
             "copay_from_rag uin=%s percent=%s page=%s",
             policy_uin, percent, (hit or {}).get("page"),
         )
-    return percent
+        return found(
+            "copay",
+            percent,
+            SOURCE_WORDING,
+            f"The wording states a {percent}% co-payment.",
+            evidence=[hit] if hit else [],
+        )
+
+    if hits:
+        return not_applicable(
+            "copay", "No co-payment clause applies to this plan."
+        )
+
+    return unknown(
+        "copay",
+        "No co-payment wording could be retrieved, so the customer's share is "
+        "unestablished.",
+    )
 
 
-def _lookup_deductible(policy_uin: str) -> float:
-    """SQL, then the wording, then 0 -- most plans have no deductible."""
+def _deductible_fact(policy_uin: str) -> PolicyFact:
+    """Resolve the deductible: SQL, then the wording, then unknown."""
     row = get_policy_store().find_deductible(policy_uin)
     if row is not None:
-        return row["deductible_amount"]
+        return found(
+            "deductible",
+            row["deductible_amount"],
+            SOURCE_SQL,
+            f"Deductible of Rs {row['deductible_amount']:,.0f} on record.",
+        )
 
-    hits = check_coverage.invoke(
-        {"treatment": "deductible", "policy_uin": policy_uin}
-    )
+    hits = check_coverage.invoke({"treatment": "deductible", "policy_uin": policy_uin})
     amount, hit = parsing.first_match(
         hits, parsing.parse_rupee_amount, keyword="deductible"
     )
@@ -221,92 +428,262 @@ def _lookup_deductible(policy_uin: str) -> float:
             "deductible_from_rag uin=%s amount=%s page=%s",
             policy_uin, amount, (hit or {}).get("page"),
         )
-        return amount
-    return 0
+        return found(
+            "deductible",
+            amount,
+            SOURCE_WORDING,
+            f"The wording states a Rs {amount:,.0f} deductible.",
+            evidence=[hit] if hit else [],
+        )
+
+    if hits:
+        return not_applicable(
+            "deductible", "This plan carries no deductible; it pays from rupee one."
+        )
+
+    return unknown(
+        "deductible",
+        "No wording could be retrieved, so whether this plan carries a "
+        "deductible is unestablished.",
+    )
 
 
-def _get_deduction_context(
-    policy_uin: str,
-    treatment: str,
-    policy_id: str,
+# ---------------------------------------------------------------------------
+# Step 11: result shapes
+# ---------------------------------------------------------------------------
+def _result(
+    status: str,
+    bill_amount: float,
+    reason: str,
+    evidence: list[dict],
+    facts: list[PolicyFact],
+    missing: list[str] | None = None,
+    covered_amount: float = 0,
+    copay_amount: float = 0,
+    payable: float | None = 0,
+    deductions: dict | None = None,
+) -> dict:
+    """Build the one result shape every caller reads."""
+    logger.info("eligibility_checked status=%s reason=%r", status, reason)
+    return {
+        "status": status,
+        "bill_amount": bill_amount,
+        "covered_amount": round(covered_amount, 2),
+        "copay_amount": copay_amount,
+        "estimated_payable": payable,
+        "reason": reason,
+        "evidence": evidence,
+        "missing_information": missing or [],
+        "facts": {fact.name: fact.to_dict() for fact in facts},
+        "deductions": deductions or {},
+    }
+
+
+def _needs_more_info(
+    bill_amount: float,
+    facts: list[PolicyFact],
+    evidence: list[dict],
+    reason: str,
+    missing: list[str],
+) -> dict:
+    """No payable figure is offered when a fact the decision rests on is missing."""
+    return _result(
+        NEEDS_MORE_INFO,
+        bill_amount,
+        reason,
+        evidence,
+        facts,
+        missing=missing,
+        payable=None,
+    )
+
+
+# ---------------------------------------------------------------------------
+# The checklist
+# ---------------------------------------------------------------------------
+def _policy_gate(
+    policy: dict | None,
     customer_id: str,
-) -> tuple:
-    """Fetch the deduction figures, reading SQL first and the wording after.
+    treatment: str,
+    bill_amount: float,
+    bill_data: dict,
+) -> dict | None:
+    """Steps 1-2, plus the claim's own completeness. None means carry on.
 
-    Each lookup is SQL -> RAG -> safe default, so a customer whose policy has
-    no curated rows still gets the limits their wording actually states.
+    The in-force check comes before the completeness check on purpose: a
+    lapsed policy cannot pay whatever the claim says, so parking it as "we
+    need more information" would send the employee chasing a detail that
+    could not change the answer.
     """
-    sub_limit = _lookup_sub_limit(policy_uin, treatment)
-    copay_percent = _lookup_copay(policy_uin, treatment)
-    deductible = _lookup_deductible(policy_uin)
+    if policy is None or policy["customer_id"] != customer_id:
+        return _result(
+            INELIGIBLE, bill_amount,
+            "This policy is not held by this customer.", [], [],
+        )
+
+    not_in_force = _check_policy_in_force(policy, bill_data.get("admission_date"))
+    if not_in_force:
+        return _result(INELIGIBLE, bill_amount, not_in_force, [], [])
+
+    # A claim that names no procedure cannot be assessed against a policy that
+    # states its conditions per procedure. The gap is in the claim, not in the
+    # policy, so it is reported as such.
+    if not _specific_terms(treatment):
+        return _needs_more_info(
+            bill_amount, [], [],
+            f"The claim gives '{treatment or 'no treatment'}', which does not "
+            f"name a specific procedure or condition to assess.",
+            ["A specific treatment or diagnosis on the claim form."],
+        )
+    return None
+
+
+def _clause_checks(
+    policy: dict, treatment: str, bill_amount: float
+) -> tuple[dict | None, PolicyFact | None, PolicyFact | None, list[dict]]:
+    """Steps 3-5: the checks that can end a claim before any arithmetic.
+
+    Returns (early_result, coverage, waiting, evidence). A non-None first
+    element means the claim is settled and the rest are meaningless.
+    """
+    policy_uin = policy["policy_number"]
+
+    is_excluded, exclusion_evidence = _check_exclusion(treatment, policy_uin)
+    if is_excluded:
+        return _result(
+            INELIGIBLE, bill_amount,
+            f"'{treatment}' appears in this policy's exclusion list.",
+            exclusion_evidence, [],
+        ), None, None, []
+
+    coverage = _check_coverage(treatment, policy_uin)
+    if not coverage.is_known:
+        return _needs_more_info(
+            bill_amount, [coverage], coverage.evidence,
+            f"Cover for '{treatment}' could not be confirmed from this "
+            f"policy's wording or records.",
+            [coverage.detail],
+        ), None, None, []
+    evidence = list(coverage.evidence)
+
+    waiting = _waiting_period_fact(policy_uin, treatment)
+    if not waiting.is_known:
+        return _needs_more_info(
+            bill_amount, [coverage, waiting], evidence,
+            f"The waiting period for '{treatment}' could not be established.",
+            [waiting.detail],
+        ), None, None, []
+    evidence.extend(waiting.evidence)
+
+    breach = _waiting_period_breach(policy, waiting)
+    if breach:
+        return _result(
+            INELIGIBLE, bill_amount, breach, evidence, [coverage, waiting]
+        ), None, None, []
+
+    return None, coverage, waiting, evidence
+
+
+def _resolve_deductions(
+    policy_uin: str, treatment: str, bill_amount: float, base: list[PolicyFact],
+    evidence: list[dict],
+) -> tuple[dict | None, list[PolicyFact]]:
+    """Steps 6-8. An unresolved fact stops the claim before any arithmetic."""
+    sub_limit = _sub_limit_fact(policy_uin, treatment)
+    copay = _copay_fact(policy_uin, treatment)
+    deductible = _deductible_fact(policy_uin)
+    facts = [*base, sub_limit, copay, deductible]
+
+    unresolved = [fact for fact in facts if not fact.is_known]
+    if unresolved:
+        return _needs_more_info(
+            bill_amount, facts, evidence,
+            "The payable amount cannot be calculated until "
+            + ", ".join(fact.name.replace("_", " ") for fact in unresolved)
+            + " is established.",
+            [fact.detail for fact in unresolved],
+        ), facts
+
+    for fact in (sub_limit, copay, deductible):
+        evidence.extend(fact.evidence)
+    return None, facts
+
+
+def _price_the_claim(
+    policy_id: str, customer_id: str, treatment: str, bill_amount: float,
+    facts: list[PolicyFact], evidence: list[dict],
+) -> dict:
+    """Steps 9-10: what is left of the cover, then the arithmetic."""
+    sub_limit, copay, deductible = facts[-3], facts[-2], facts[-1]
 
     balance = compute_sum_insured_balance(policy_id, customer_id)
-    remaining_sum_insured = balance.get("remaining_balance", 0)
+    remaining = balance.get("remaining_balance", 0)
+    facts = [
+        *facts,
+        found(
+            "remaining_sum_insured", remaining, SOURCE_SQL,
+            f"Rs {remaining:,.0f} of Rs {balance.get('sum_insured', 0):,.0f} "
+            f"remains for this policy year.",
+        ),
+    ]
+    if remaining <= 0:
+        return _result(
+            INELIGIBLE, bill_amount,
+            "The sum insured for this policy year is exhausted.",
+            evidence, facts,
+        )
 
-    return sub_limit, copay_percent, deductible, remaining_sum_insured
+    # The one place a rupee figure is produced, and it is a pure function.
+    payable = calculate_payable_amount.invoke({
+        "bill_amount": bill_amount,
+        "sub_limit": sub_limit.value_or(None),
+        "copay_percent": copay.value_or(0),
+        "deductible": deductible.value_or(0),
+        "remaining_sum_insured": remaining,
+    })
+
+    return _result(
+        ELIGIBLE,
+        bill_amount,
+        f"'{treatment}' is covered, no exclusion applies, and every condition "
+        f"on it was checked.",
+        evidence,
+        facts,
+        covered_amount=bill_amount - payable["deductions"]["sub_limit_reduction"],
+        copay_amount=payable["deductions"]["copay_amount"],
+        payable=payable["payable_amount"],
+        deductions=payable["deductions"],
+    )
 
 
 def check_eligibility(bill_data: dict, customer_id: str, policy_id: str) -> dict:
-    """Run the full eligibility checklist for one bill against one policy."""
-    policy = get_crm_store().get_policy(policy_id)
-    if policy is None or policy["customer_id"] != customer_id:
-        return {"eligible": False, "rejection_reason": "Policy not found for this customer."}
+    """Run the full eligibility checklist for one claim against one policy.
 
-    treatment = bill_data.get("treatment") or bill_data.get("diagnosis") or ""
+    Each phase either settles the claim and returns a result, or hands the
+    next one what it established. Nothing is assumed on the way through: a
+    fact that could not be read stops the claim rather than defaulting.
+    """
+    treatment = (bill_data.get("treatment") or bill_data.get("diagnosis") or "").strip()
     bill_amount = float(bill_data.get("total_amount") or 0)
-    policy_uin = policy["policy_number"]
+    policy = get_crm_store().get_policy(policy_id)
 
-    rejection_reason = _check_policy_active(policy)
-    if rejection_reason:
-        return _rejected(bill_amount, rejection_reason, [])
+    blocked = _policy_gate(policy, customer_id, treatment, bill_amount, bill_data)
+    if blocked:
+        return blocked
 
-    rejection_reason, evidence = _check_coverage_and_exclusion(treatment, policy_uin)
-    if rejection_reason:
-        return _rejected(bill_amount, rejection_reason, evidence)
-
-    rejection_reason = _check_waiting_period(policy, treatment)
-    if rejection_reason:
-        return _rejected(bill_amount, rejection_reason, evidence)
-
-    sub_limit, copay_percent, deductible, remaining_sum_insured = _get_deduction_context(
-        policy_uin, treatment, policy_id, customer_id
+    settled, coverage, waiting, evidence = _clause_checks(
+        policy, treatment, bill_amount
     )
-    if remaining_sum_insured <= 0:
-        return _rejected(bill_amount, "Sum insured for this policy year is exhausted.", evidence)
+    if settled:
+        return settled
 
-    payable = calculate_payable_amount.invoke({
-        "bill_amount": bill_amount,
-        "sub_limit": sub_limit,
-        "copay_percent": copay_percent,
-        "deductible": deductible,
-        "remaining_sum_insured": remaining_sum_insured,
-    })
-    covered_amount = bill_amount - payable["deductions"]["sub_limit_reduction"]
-
-    logger.info(
-        "eligibility_checked customer_id=%s policy_id=%s treatment=%r eligible=True payable=%s",
-        customer_id, policy_id, treatment, payable["payable_amount"],
+    unresolved, facts = _resolve_deductions(
+        policy["policy_number"], treatment, bill_amount,
+        [coverage, waiting], evidence,
     )
-    return {
-        "eligible": True,
-        "bill_amount": bill_amount,
-        "covered_amount": round(covered_amount, 2),
-        "copay_amount": payable["deductions"]["copay_amount"],
-        "estimated_payable": payable["payable_amount"],
-        "rejection_reason": None,
-        "evidence": evidence,
-    }
+    if unresolved:
+        return unresolved
 
-
-def _rejected(bill_amount: float, reason: str, evidence: list[dict]) -> dict:
-    """Build the standard rejection response shape."""
-    logger.info("eligibility_checked eligible=False reason=%r", reason)
-    return {
-        "eligible": False,
-        "bill_amount": bill_amount,
-        "covered_amount": 0,
-        "copay_amount": 0,
-        "estimated_payable": 0,
-        "rejection_reason": reason,
-        "evidence": evidence,
-    }
+    return _price_the_claim(
+        policy_id, customer_id, treatment, bill_amount, facts, evidence
+    )

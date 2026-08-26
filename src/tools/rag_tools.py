@@ -88,13 +88,20 @@ def warmup() -> None:
     _warmup_retrieval()
 
 
+# What "is this payable" needs to see: the clause that covers the treatment,
+# the clause that caps it, and the clause that sets the customer's share.
+# Splitting these across three tools would only make the model pick wrong --
+# they are three halves of one question, and the reranker sorts them out.
+COVERAGE_TOPICS = ["coverage", "sub_limit", "copay"]
+
+
 @tool
 def check_coverage(treatment: str, policy_uin: str | None = None) -> list[dict]:
     """Find policy clauses that state whether a treatment or procedure is
-    covered. Also searches sub-limit chunks (e.g. 'cataract covered up to
-    Rs 40,000'). Pass policy_uin to narrow to one plan. Returns clauses with
-    UIN, page, and insurer for citation."""
-    return _search(treatment, topic=["coverage", "sub_limit"], policy_uin=policy_uin)
+    covered, what sub-limit caps it (e.g. 'cataract covered up to Rs 40,000'),
+    and any co-payment the customer bears. Pass policy_uin to narrow to one
+    plan. Returns clauses with UIN, page, and insurer for citation."""
+    return _search(treatment, topic=COVERAGE_TOPICS, policy_uin=policy_uin)
 
 
 @tool

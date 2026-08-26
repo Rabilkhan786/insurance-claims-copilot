@@ -18,7 +18,15 @@ import pytest
 
 from config import settings
 from src.crm import CRMStore
-from src.eligibility import check_eligibility
+from src.eligibility import (
+    ELIGIBLE,
+    FOUND,
+    INELIGIBLE,
+    NEEDS_MORE_INFO,
+    NOT_APPLICABLE,
+    UNKNOWN,
+    check_eligibility,
+)
 from src.policy_data import PolicyDataStore
 from src.tools.calc_tools import (
     calculate_payable_amount,
@@ -109,7 +117,7 @@ def test_cust001_cataract_bill_applies_sub_limit_then_copay():
 
     result = check_eligibility(bill, "CUST001", "POL001")
 
-    assert result["eligible"] is True
+    assert result["status"] == ELIGIBLE
     assert result["covered_amount"] == 40000
     assert result["copay_amount"] == 2000
     assert result["estimated_payable"] == 38000
@@ -149,8 +157,8 @@ def test_cust002_maternity_bill_is_rejected_for_the_waiting_period():
 
     result = check_eligibility(bill, "CUST002", "POL002")
 
-    assert result["eligible"] is False
-    assert "waiting period" in result["rejection_reason"].lower()
+    assert result["status"] == INELIGIBLE
+    assert "waiting period" in result["reason"].lower()
     assert result["estimated_payable"] == 0
 
 
@@ -211,8 +219,8 @@ def test_cust004_cosmetic_surgery_bill_is_not_eligible():
 
     result = check_eligibility(bill, "CUST004", "POL004")
 
-    assert result["eligible"] is False
-    assert result["rejection_reason"]
+    assert result["status"] == INELIGIBLE
+    assert "exclusion" in result["reason"].lower()
     assert result["estimated_payable"] == 0
 
 
@@ -254,13 +262,15 @@ def test_cust004_policy_has_a_deductible_on_record(policy_data):
 def _topup_bill(amount: float) -> dict:
     """A bill that clears the coverage and exclusion gates on CUST004's plan.
 
-    The treatment has to be one the policy actually covers, otherwise the
-    claim is rejected earlier and a payable of 0 would prove nothing about
-    the deductible.
+    The treatment has to name a real procedure. This said "hospitalisation"
+    until the engine gained its third state: that word carries no identifying
+    term, so there is nothing to check a policy's per-procedure conditions
+    against, and the claim is now correctly parked as needs_more_info rather
+    than assessed. See the test below, which pins that behaviour.
     """
     return {
-        "treatment": "hospitalisation",
-        "diagnosis": "hospitalisation",
+        "treatment": "Angioplasty",
+        "diagnosis": "Coronary artery disease",
         "total_amount": amount,
         "admission_date": "2026-08-19",
         "discharge_date": "2026-08-19",
@@ -271,11 +281,12 @@ def test_cust004_bill_at_the_deductible_pays_nothing():
     """A 200,000 bill against a 200,000 deductible leaves nothing over.
 
     The claim is still eligible -- it is the deductible that reduces the
-    payout to zero, not a rejection.
+    payout to zero, not a rejection. A payable of 0 and a rejection mean
+    very different things to the employee reading the screen.
     """
     result = check_eligibility(_topup_bill(200000), "CUST004", "POL004")
 
-    assert result["eligible"] is True
+    assert result["status"] == ELIGIBLE
     assert result["estimated_payable"] == 0
 
 
@@ -283,8 +294,29 @@ def test_cust004_bill_above_the_deductible_pays_the_excess():
     """500,000 bill - 200,000 deductible = 300,000, no co-pay on this plan."""
     result = check_eligibility(_topup_bill(500000), "CUST004", "POL004")
 
-    assert result["eligible"] is True
+    assert result["status"] == ELIGIBLE
     assert result["estimated_payable"] == 300000
+
+
+def test_a_claim_naming_no_procedure_is_parked_not_assessed():
+    """"hospitalisation" names no procedure, so there is nothing to assess.
+
+    The old engine ran the whole checklist on it, found no exclusion, and
+    approved -- reporting a payable amount for a claim whose treatment field
+    said nothing at all.
+    """
+    bill = {
+        "treatment": "hospitalisation",
+        "diagnosis": "",
+        "total_amount": 500000,
+        "admission_date": "2026-08-19",
+    }
+
+    result = check_eligibility(bill, "CUST004", "POL004")
+
+    assert result["status"] == NEEDS_MORE_INFO
+    assert result["estimated_payable"] is None
+    assert result["missing_information"]
 
 
 def test_an_ordinary_policy_has_no_deductible(policy_data):
@@ -333,38 +365,70 @@ def test_the_unseeded_policy_really_has_no_curated_rows(policy_data):
 
 def test_sub_limit_falls_back_to_the_policy_wording():
     """With no SQL row the cap must still be read out of the clause text."""
-    from src.eligibility.engine import _lookup_sub_limit
+    from src.eligibility.engine import _sub_limit_fact
 
-    amount = _lookup_sub_limit(UNSEEDED_UIN, UNSEEDED_TREATMENT)
+    fact = _sub_limit_fact(UNSEEDED_UIN, UNSEEDED_TREATMENT)
 
-    assert amount is not None
-    assert amount > 0
+    assert fact.status == FOUND
+    assert fact.value > 0
+    assert fact.source == "policy wording"
 
 
-def test_missing_copay_defaults_to_none_not_a_guess():
-    """This policy states no co-pay, so nothing may be invented for it.
+def test_a_policy_stating_no_copay_is_not_the_same_as_an_unread_policy():
+    """The distinction the whole three-state model exists for.
 
-    None is read downstream as 0%, which is the safe direction: the customer
-    is never charged a percentage the wording does not support.
+    "This plan states no co-payment" and "nobody could find out whether it
+    does" both used to arrive at the calculator as None, and both were read
+    as 0%. One of those is a fact; the other is a gap, and only one of them
+    is safe to price a claim on.
     """
-    from src.eligibility.engine import _lookup_copay
+    from src.eligibility.engine import _copay_fact
 
-    assert _lookup_copay(UNSEEDED_UIN, UNSEEDED_TREATMENT) is None
+    fact = _copay_fact(UNSEEDED_UIN, UNSEEDED_TREATMENT)
+
+    assert fact.status in {NOT_APPLICABLE, FOUND}
+    assert fact.is_known
+    # Whatever it resolved to, it must explain itself to the employee.
+    assert fact.detail
 
 
-def test_missing_deductible_defaults_to_zero():
-    """Only top-ups carry a deductible; this plan must resolve to exactly 0."""
-    from src.eligibility.engine import _lookup_deductible
+def test_missing_deductible_resolves_explicitly_not_by_default():
+    """Only top-ups carry one, but "no deductible" has to be established."""
+    from src.eligibility.engine import _deductible_fact
 
-    assert _lookup_deductible(UNSEEDED_UIN) == 0
+    fact = _deductible_fact(UNSEEDED_UIN)
+
+    assert fact.is_known
+    assert fact.value_or(0) == 0
+
+
+def test_an_unknown_fact_reports_no_value_at_all():
+    """A fact that could not be established must not collapse to a default.
+
+    value_or() is the only way to read one, and it hands back the caller's
+    default only when the fact was actually FOUND -- so an UNKNOWN can never
+    be mistaken for a zero on its way into the arithmetic.
+    """
+    from src.eligibility.facts import unknown
+
+    fact = unknown("copay", "nothing could be retrieved")
+
+    assert fact.is_known is False
+    assert fact.value_or(0) == 0
+    assert fact.status == UNKNOWN
 
 
 def test_waiting_period_needs_a_clause_naming_the_treatment():
-    """A generic treatment name must not inherit an unrelated waiting period.
+    """A treatment must not inherit an unrelated waiting period.
 
     Cataract once picked up the 48-month pre-existing-disease clause from a
-    neighbouring paragraph and was wrongly rejected.
+    neighbouring paragraph and was wrongly rejected. The plan's curated
+    schedule lists pre-existing disease and nothing else, so any other
+    treatment resolves to "does not apply" rather than borrowing that number.
     """
-    from src.eligibility.engine import _waiting_period_months
+    from src.eligibility.engine import _waiting_period_fact
 
-    assert _waiting_period_months("SHAHLIP22027V032122", "hospitalisation") is None
+    fact = _waiting_period_fact("SHAHLIP22027V032122", "Cataract Surgery")
+
+    assert fact.status == NOT_APPLICABLE
+    assert fact.value is None

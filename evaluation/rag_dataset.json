@@ -56,18 +56,17 @@
     "topic": "sub_limit"
   },
   {
-    "question": "A claimant holds Star Health's Arogya Sanjeevani policy and its Senior Citizens Red Carpet policy. Which one has the shorter pre-existing disease waiting period when assessing the claim?",
-    "ground_truth": "Arogya Sanjeevani has a longer pre-existing disease waiting period of 48 months, while the Senior Citizens Red Carpet policy's waiting period is shorter, at 12 months.",
+    "question": "A hospitalisation claim has been submitted under the Star Health Arogya Sanjeevani policy. What co-payment does the policyholder bear on the admissible claim amount?",
+    "ground_truth": "Every admissible claim under the Arogya Sanjeevani policy carries a co-payment of 5% of the admissible claim amount, which the policyholder bears; the insurer pays the balance.",
     "context_uin": "SHAHLIP22027V032122",
-    "context_uin_2": "SHAHLIP25027V072425",
     "context_page": 8,
-    "topic": "comparison"
+    "topic": "copay_deductible"
   },
   {
-    "question": "A Daily Hospital Cash Allowance claim has been submitted under the Oriental Happy Family Floater Policy. What is payable under the Silver, Gold and Diamond plans?",
-    "ground_truth": "Daily Hospital Cash Allowance is not available under the Silver plan. Under Gold, it is 0.1% of sum insured (Rs 600-1,000/day); under Diamond, it is 0.1% of sum insured (Rs 1,200-2,000/day); both are capped at 10 days per illness and an overall 1.5% of sum insured.",
-    "context_uin": "IRDAII/HLT/OIC/P-H/V.II/450/15-16",
-    "context_page": 2,
-    "topic": "comparison"
+    "question": "A claim has been submitted under the New India Top-Up Mediclaim policy. How does the deductible determine what this policy pays?",
+    "ground_truth": "The Top-Up Mediclaim policy pays only the portion of admissible hospitalisation expenses that exceeds the deductible chosen and recorded on the policy schedule. Expenses up to that deductible are borne by the insured or met by an underlying policy; the wording does not fix a single deductible figure, since the amount is an option selected at inception.",
+    "context_uin": "IRDA/NL-HLT/NIA/P-H/V.I/35/14-15",
+    "context_page": 12,
+    "topic": "copay_deductible"
   }
 ]

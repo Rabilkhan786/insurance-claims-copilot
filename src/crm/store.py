@@ -42,6 +42,19 @@ class CRMStore(SqliteStore):
             ).fetchone()
         return dict(row) if row else None
 
+    def list_customers(self) -> list[dict]:
+        """Every customer, for the claim form's picker.
+
+        Here rather than in the UI because the UI was opening its own sqlite3
+        connection and writing its own SELECT -- a second, silent copy of this
+        table's shape that would not have moved if the schema did.
+        """
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT customer_id, name FROM customers ORDER BY customer_id"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     # -- policies ------------------------------------------------------
     def add_policy(
         self,

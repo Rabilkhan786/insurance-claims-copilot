@@ -1,6 +1,7 @@
+# An internal copilot for claims employees, not a customer chatbot.
+# The project's name lives in pyproject.toml; it was duplicated here and read
+# by nothing, which is one more place for the two to drift apart.
 project:
-  # An internal copilot for claims employees, not a customer chatbot.
-  name: insurance-claims-copilot
   data_dir: Data/insurance_documents
   artifacts_dir: artifacts
 

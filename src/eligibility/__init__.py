@@ -1,4 +1,14 @@
 """Public exports for the eligibility subpackage."""
-from .engine import check_eligibility
+from .engine import ELIGIBLE, INELIGIBLE, NEEDS_MORE_INFO, check_eligibility
+from .facts import FOUND, NOT_APPLICABLE, UNKNOWN, PolicyFact
 
-__all__ = ["check_eligibility"]
+__all__ = [
+    "ELIGIBLE",
+    "INELIGIBLE",
+    "NEEDS_MORE_INFO",
+    "FOUND",
+    "NOT_APPLICABLE",
+    "UNKNOWN",
+    "PolicyFact",
+    "check_eligibility",
+]

@@ -1,8 +1,8 @@
 """Agent-facing calculation tools — pure Python, no LLM.
 
 The LLM never does arithmetic on money or dates in this project. It calls
-these functions and reports their results, so a customer sees the same
-number every time they ask the same question.
+these functions and reports their results, so the same claim produces the
+same figure every time it is assessed, and the audit trail can be replayed.
 """
 from __future__ import annotations
 
@@ -12,9 +12,9 @@ from datetime import date, datetime
 from langchain.tools import ToolRuntime
 from langchain_core.tools import tool
 
-from config import settings
 from src.crm import get_crm_store
 from src.policy_data import get_policy_store
+
 
 def _parse_date(value: str | date) -> date:
     """Accept either a date/datetime object or an ISO-formatted string."""
@@ -63,8 +63,8 @@ def waiting_period_tracker(
     runtime: ToolRuntime,
     waiting_period_months: int | None = None,
 ) -> dict:
-    """Give the exact date cover for a condition begins on the signed-in
-    customer's policy, returning eligible_date, days_remaining and is_eligible.
+    """Give the exact date cover for a condition begins on this customer's
+    policy, returning eligible_date, days_remaining and is_eligible.
     Pass policy_id from get_policies and the condition (e.g. maternity,
     cataract). The waiting period is looked up automatically — only pass
     waiting_period_months if a clause stated a number this policy's records
@@ -139,7 +139,7 @@ def compute_sum_insured_balance(policy_id: str, customer_id: str) -> dict:
 
 @tool
 def sum_insured_balance(policy_id: str, runtime: ToolRuntime) -> dict:
-    """Report what the signed-in customer's policy still pays: sum_insured,
+    """Report what this customer's policy still pays: sum_insured,
     claims_used, remaining_balance, plus the policy's deductible and
     copay_percent. Call this before calculate_payable_amount and pass its
     deductible and copay_percent straight through — they are often non-zero.
@@ -148,7 +148,7 @@ def sum_insured_balance(policy_id: str, runtime: ToolRuntime) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# 5. Payable amount
+# 3. Payable amount
 # ---------------------------------------------------------------------------
 def _apply_deductions(
     covered_amount: float,

@@ -5,10 +5,13 @@ Run with:  uv run streamlit run streamlit_app.py
 This is an INTERNAL tool. The person using it is a claims employee, not a
 customer. The screen shows a recommendation and the employee decides: the
 Approve / Edit / Reject actions at the bottom are the point of the whole app.
+
+There is no business logic in this file. Every figure on screen came from the
+deterministic engine, every clause from the retrieval layer, and every
+database read goes through the CRM store -- the UI only lays them out.
 """
 from __future__ import annotations
 
-import sqlite3
 from datetime import date
 from uuid import uuid4
 
@@ -20,6 +23,20 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# How the engine's three states read on screen.
+STATUS_DISPLAY = {
+    "approve": ("success", "Recommend: approve"),
+    "reject": ("error", "Recommend: reject"),
+    "needs_more_info": ("warning", "Recommend: needs more info"),
+}
+
+# A fact's status, in words an employee reads rather than a field value.
+FACT_STATUS_DISPLAY = {
+    "found": "established",
+    "not_applicable": "does not apply",
+    "unknown": "NOT ESTABLISHED",
+}
 
 
 @st.cache_resource(show_spinner="Loading retrieval models - first run only...")
@@ -34,37 +51,17 @@ def _warmup():
 @st.cache_data(ttl=60)
 def _customers() -> list[dict]:
     """List real customers from the CRM so no IDs are hardcoded here."""
-    from config import settings
+    from src.crm import get_crm_store
 
-    try:
-        connection = sqlite3.connect(settings.crm_db_path)
-        connection.row_factory = sqlite3.Row
-        rows = connection.execute(
-            "SELECT customer_id, name FROM customers ORDER BY customer_id"
-        ).fetchall()
-        connection.close()
-        return [dict(row) for row in rows]
-    except sqlite3.Error:
-        return []
+    return get_crm_store().list_customers()
 
 
 @st.cache_data(ttl=60)
 def _policies_for(customer_id: str) -> list[dict]:
     """Policies belonging to one customer, for the policy dropdown."""
-    from config import settings
+    from src.crm import get_crm_store
 
-    try:
-        connection = sqlite3.connect(settings.crm_db_path)
-        connection.row_factory = sqlite3.Row
-        rows = connection.execute(
-            "SELECT policy_id, policy_name, policy_number, sum_insured "
-            "FROM policies WHERE customer_id = ? ORDER BY policy_id",
-            (customer_id,),
-        ).fetchall()
-        connection.close()
-        return [dict(row) for row in rows]
-    except sqlite3.Error:
-        return []
+    return get_crm_store().get_policies(customer_id)
 
 
 def _init_state() -> None:
@@ -78,9 +75,14 @@ def _init_state() -> None:
 
 
 def _money(value) -> str:
-    """Format a rupee amount, tolerating None."""
+    """Format a rupee amount, tolerating None.
+
+    None is not zero: it means the engine declined to give a figure because a
+    fact it depends on is missing. Showing "Rs 0.00" there would read as
+    "nothing is payable", which is a different and much stronger claim.
+    """
     if value is None:
-        return "-"
+        return "not calculated"
     return f"Rs {float(value):,.2f}"
 
 
@@ -111,7 +113,7 @@ def render_claim_form() -> None:
     """The claim-entry form. Submitting it runs the whole analysis."""
     customers = _customers()
     if not customers:
-        st.error("No customers found in the CRM. Run `python Data/seed.py` first.")
+        st.error("No customers found in the CRM. Run `uv run python Data/seed.py` first.")
         return
 
     labels = {f"{c['customer_id']} - {c['name']}": c["customer_id"] for c in customers}
@@ -163,20 +165,59 @@ def render_claim_form() -> None:
         )
 
 
-def render_breakdown(eligibility: dict) -> None:
+def render_breakdown(recommendation: dict) -> None:
     """Show the deduction breakdown the engine produced."""
+    deductions = recommendation.get("deductions") or {}
     first, second, third = st.columns(3)
-    first.metric("Bill amount", _money(eligibility.get("bill_amount")))
-    second.metric("Co-pay deducted", _money(eligibility.get("copay_amount")))
-    third.metric("Recommended payable", _money(eligibility.get("estimated_payable")))
+    first.metric("Bill amount", _money(recommendation.get("bill_amount")))
+    second.metric("Co-pay deducted", _money(deductions.get("copay_amount") or 0))
+    third.metric("Recommended payable", _money(recommendation.get("payable_amount")))
 
-    if eligibility.get("rejection_reason"):
-        st.warning(f"Deciding check: {eligibility['rejection_reason']}")
+    if recommendation.get("reason_summary"):
+        st.caption(f"Deciding check: {recommendation['reason_summary']}")
 
 
-def render_evidence(eligibility: dict) -> None:
+def render_facts(recommendation: dict) -> None:
+    """Show every policy fact the engine resolved, and how it resolved it.
+
+    This table is what separates a copilot from a black box: an employee can
+    see that the co-pay came from the policy records and the sub-limit from
+    the wording, and that nothing was assumed.
+    """
+    facts = recommendation.get("facts") or []
+    if not facts:
+        return
+
+    st.markdown("**What the engine established**")
+    st.dataframe(
+        [
+            {
+                "Fact": fact["name"].replace("_", " ").title(),
+                "Status": FACT_STATUS_DISPLAY.get(fact["status"], fact["status"]),
+                "Value": fact.get("value") if fact.get("value") is not None else "-",
+                "Source": fact.get("source", "-"),
+                "Detail": fact.get("detail", ""),
+            }
+            for fact in facts
+        ],
+        hide_index=True,
+    )
+
+
+def render_missing(recommendation: dict) -> None:
+    """List what the employee has to chase before this claim can be decided."""
+    missing = recommendation.get("missing_information") or []
+    if not missing:
+        return
+
+    st.warning("**Missing information** - chase these before deciding:")
+    for item in missing:
+        st.markdown(f"- {item}")
+
+
+def render_evidence(recommendation: dict) -> None:
     """List the cited policy clauses behind the recommendation."""
-    evidence = eligibility.get("evidence") or []
+    evidence = recommendation.get("evidence") or []
     if not evidence:
         st.info("No policy clauses were retrieved for this claim.")
         return
@@ -208,11 +249,17 @@ def _save(decision: str, employee: str, **extra) -> None:
     st.rerun()
 
 
-def _render_actions(employee: str, eligibility: dict) -> None:
+def _render_actions(employee: str, recommendation: dict) -> None:
     """Approve as-is, approve with edits, or reject the recommendation."""
     approve, edit, reject = st.tabs(["Approve", "Edit", "Reject"])
+    payable = recommendation.get("payable_amount")
 
     with approve:
+        if recommendation.get("status") == "needs_more_info":
+            st.info(
+                "The copilot could not establish everything this claim turns "
+                "on. Approving records that you decided anyway."
+            )
         st.write("Record the recommendation exactly as it stands.")
         if st.button("Approve as recommended", type="primary"):
             _save("approve", employee)
@@ -221,7 +268,7 @@ def _render_actions(employee: str, eligibility: dict) -> None:
         amount = st.number_input(
             "Corrected payable amount (Rs)",
             min_value=0.0,
-            value=float(eligibility.get("estimated_payable") or 0),
+            value=float(payable or 0),
             step=500.0,
         )
         edits = st.text_area("What you changed and why", key="edit_note")
@@ -243,22 +290,24 @@ def render_review_panel(employee: str) -> None:
     if not review:
         return
 
-    eligibility = review.get("eligibility") or {}
+    recommendation = review.get("recommendation") or {}
     st.divider()
     st.subheader("Recommendation - awaiting your review")
 
-    if eligibility.get("eligible"):
-        st.success("Engine result: eligible")
-    else:
-        st.error("Engine result: not eligible")
+    style, label = STATUS_DISPLAY.get(
+        recommendation.get("status"), ("info", "No recommendation")
+    )
+    getattr(st, style)(label)
 
-    render_breakdown(eligibility)
-    st.markdown(review.get("recommendation") or "")
-    render_evidence(eligibility)
+    render_breakdown(recommendation)
+    render_missing(recommendation)
+    st.markdown(recommendation.get("reasoning") or "")
+    render_facts(recommendation)
+    render_evidence(recommendation)
 
     st.divider()
     st.markdown("**Your decision** - this is what gets recorded, not the AI's.")
-    _render_actions(employee, eligibility)
+    _render_actions(employee, recommendation)
 
 
 def render_audit_trail() -> None:
@@ -292,6 +341,7 @@ def render_audit_trail() -> None:
             }
             for row in rows
         ],
+        hide_index=True,
     )
 
 

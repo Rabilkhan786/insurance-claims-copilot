@@ -147,6 +147,46 @@ PINECONE_ONLY_KEYWORDS = {
     "pinecone_only": ("zone a/b", "prescribed time limit", "grace period"),
 }
 
+# --- table type -> the topics retrieval actually filters on --------------
+# WHY this map exists: a table type names the SHAPE of the table found in the
+# PDF ("modern_treatment", "room_rent"). The RAG tools filter on the topic
+# vocabulary the chunker uses for prose ("coverage", "sub_limit",
+# "exclusion", "waiting_period", "copay"). Those two vocabularies are not the
+# same, and the pipeline used to write the table type straight into `topics`.
+#
+# The result was silent and expensive: a "Robotic surgeries ... covered up to
+# Rs X" row was indexed under topics=["modern_treatment"], while
+# check_coverage searches topics $in ["coverage", "sub_limit", "copay"]. The
+# row was in Pinecone, correct and citable, and no tool could ever return it.
+# Every table type below therefore has to name topics a tool actually asks
+# for, or the rows it produces are write-only.
+TABLE_TYPE_TOPICS = {
+    "waiting_period": ["waiting_period"],
+    # A sub-limit row states both that something is covered and what caps it.
+    "sub_limit": ["sub_limit", "coverage"],
+    "copayment": ["copay"],
+    "room_rent": ["sub_limit"],
+    "plan_comparison": ["coverage"],
+    "accidental_payout": ["coverage"],
+    "modern_treatment": ["coverage"],
+    # Restoration/refill tops the sum insured back up, so it changes what is
+    # payable on a later claim -- a coverage fact, not an administrative one.
+    "restoration": ["coverage"],
+    "cancellation_refund": ["claim_procedure"],
+    "entry_age": ["definition"],
+    "pinecone_only": ["claim_procedure"],
+}
+
+
+def retrieval_topics(table_type: str) -> list[str]:
+    """Return the topics a table's rows should be indexed under.
+
+    Falls back to "general" for an unmapped type: that keeps the chunk
+    searchable without a filter, and matches what the chunker does with prose
+    it cannot classify.
+    """
+    return TABLE_TYPE_TOPICS.get(table_type, ["general"])
+
 
 def table_to_text(table: dict) -> str:
     """Flatten every cell in a table into one lowercase string for matching."""

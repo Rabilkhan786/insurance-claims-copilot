@@ -1,16 +1,15 @@
 {
-  "timestamp": "2026-08-19T15:38:47.474898+00:00",
-  "dataset_size": 10,
+  "timestamp": "2026-08-26T13:55:44.019869+00:00",
+  "dataset_size": 5,
   "answer_provider": "cerebras",
   "answer_model": "gpt-oss-120b",
-  "judge_provider": "groq",
-  "judge_model": "openai/gpt-oss-120b",
-  "note": "Question 10 was only partly scored: the Groq judge hit its 200,000 tokens-per-day limit mid-question, so context_precision and context_recall are means over 9 questions while faithfulness and answer_relevancy are means over all 10.",
+  "judge_provider": "cerebras",
+  "judge_model": "gpt-oss-120b",
+  "note": "Answer and judge are the same model -- scores can run higher than a different-model judge would give (self-grading bias).",
   "scores": {
-    "faithfulness": 0.9,
-    "answer_relevancy": 0.552018978921741,
-    "context_precision": 0.5092592592166666,
-    "context_recall": 0.5555555555555556
-  },
-  "retrieval": "topic-routed (check_waiting_period / check_exclusion / check_coverage), final_top_k=8"
+    "faithfulness": 1.0,
+    "answer_relevancy": 0.643720860213026,
+    "context_precision": 0.449999999955,
+    "context_recall": 0.6
+  }
 }

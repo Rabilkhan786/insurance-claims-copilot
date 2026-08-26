@@ -18,6 +18,7 @@ invoke time and reaches the tools through ToolRuntime.
 from __future__ import annotations
 
 import logging
+from functools import lru_cache
 from typing import Any
 from uuid import uuid4
 
@@ -28,6 +29,7 @@ from langgraph.types import Command, interrupt
 
 from config import settings
 from src.agent.agent import Context, get_agent, get_checkpointer
+from src.agent.recommendation import ClaimRecommendation
 from src.decisions import DecisionStore
 from src.eligibility import check_eligibility
 
@@ -45,7 +47,9 @@ class WorkflowState(MessagesState, total=False):
     # runtime.context is None in every node after the interrupt.
     customer_id: str | None
     eligibility: dict[str, Any] | None
-    recommendation: str | None
+    # The typed ClaimRecommendation, flattened. Built once in review_node so
+    # the payload the employee saw is exactly what the audit row stores.
+    recommendation: dict[str, Any] | None
     decision: dict[str, Any] | None
     error: str | None
 
@@ -59,10 +63,16 @@ not listed.
 
 Structure it as:
 1. Recommend: approve / reject / needs more info -- and why, in one sentence.
-2. The payable amount, and which deduction reduced the bill to it.
+2. The payable amount, and which deduction reduced the bill to it. If the \
+status is needs_more_info there is no payable amount yet -- say what has to \
+be established before one can be calculated, and do not invent a figure.
 3. The policy clauses that support the decision, each with its citation in \
 the exact format [Source: {{insurer}}, UIN: {{uin}}, Page {{page}}].
 4. Anything missing that the employee should chase before deciding.
+
+Read the per-fact statuses before you write. "unknown" means the fact was \
+never established -- never report it as zero or as not applying. \
+"not_applicable" does mean the policy states no such condition.
 
 This is a recommendation for a human to review, never a final answer. Do not \
 write "the claim is approved" -- write "recommend: approve".
@@ -74,15 +84,10 @@ Claim as submitted:
 {claim}"""
 
 
-_decision_store: DecisionStore | None = None
-
-
+@lru_cache(maxsize=1)
 def get_decision_store() -> DecisionStore:
     """Return the shared audit-trail store, building it once per process."""
-    global _decision_store
-    if _decision_store is None:
-        _decision_store = DecisionStore(settings.crm_db_path)
-    return _decision_store
+    return DecisionStore(settings.crm_db_path)
 
 
 def _to_bill_data(claim: dict) -> dict:
@@ -102,7 +107,7 @@ def _to_bill_data(claim: dict) -> dict:
 
 
 def eligibility_node(state: WorkflowState, runtime: Runtime[Context]) -> dict:
-    """Run the deterministic 8-step checklist, then queue it for explanation."""
+    """Run the deterministic checklist, then queue its result for explanation."""
     customer_id = runtime.context.customer_id
     policy_id = state.get("policy_id")
     if not customer_id or not policy_id:
@@ -114,7 +119,7 @@ def eligibility_node(state: WorkflowState, runtime: Runtime[Context]) -> dict:
 
     eligibility = check_eligibility(bill_data, customer_id, policy_id)
     print(
-        f"eligibility_node: eligible={eligibility.get('eligible')} "
+        f"eligibility_node: status={eligibility.get('status')} "
         f"payable={eligibility.get('estimated_payable')}"
     )
 
@@ -137,40 +142,41 @@ def review_node(state: WorkflowState) -> dict:
     interrupt() raises the first time through: LangGraph checkpoints the state
     and returns this payload to whoever invoked the graph. When the client
     resumes with Command(resume=...), the node runs again from the top and
-    interrupt() returns that value instead of raising -- so keep the work
-    above it cheap, because it happens twice.
+    interrupt() returns that value instead of raising -- so everything above
+    it has to be safe to run twice. It is: building the recommendation is a
+    pure function of state, with no writes and no tool calls.
     """
-    recommendation = _last_ai_text(state.get("messages", []))
-    print("review_node: pausing for employee review")
+    recommendation = ClaimRecommendation.from_engine(
+        state.get("eligibility") or {},
+        reasoning=_last_ai_text(state.get("messages", [])),
+    )
+    print(f"review_node: pausing for employee review ({recommendation.status})")
 
     decision = interrupt(
         {
-            "recommendation": recommendation,
-            "eligibility": state.get("eligibility"),
+            "recommendation": recommendation.model_dump(),
             "claim": state.get("claim"),
         }
     )
 
     print(f"review_node: employee chose {decision.get('decision')!r}")
-    return {"recommendation": recommendation, "decision": decision}
+    return {"recommendation": recommendation.model_dump(), "decision": decision}
 
 
 def persist_decision_node(state: WorkflowState) -> dict:
     """Write the AI recommendation and the employee's decision side by side."""
     decision = state.get("decision") or {}
-    eligibility = state.get("eligibility") or {}
     claim = state.get("claim") or {}
-
-    # The recommendation text is part of the audit record, not just the
-    # engine's numbers -- it is what the employee actually read.
-    recommendation = {**eligibility, "reasoning": state.get("recommendation")}
 
     try:
         get_decision_store().record(
             claim_id=state.get("claim_id") or claim.get("claim_id") or str(uuid4()),
             customer_id=state.get("customer_id") or "",
             policy_id=state.get("policy_id"),
-            recommendation=recommendation,
+            # The whole typed recommendation is the audit record: the status,
+            # the figure, the reasoning the employee actually read, and the
+            # evidence behind it. It is never overwritten by their answer.
+            recommendation=state.get("recommendation") or {},
             employee_decision=decision.get("decision", "approve"),
             employee_payable_amount=decision.get("payable_amount"),
             employee_edits=decision.get("edits"),
@@ -307,7 +313,6 @@ def run_claim_review(
             "session_id": session_id,
             "awaiting_review": True,
             "recommendation": pending.get("recommendation"),
-            "eligibility": pending.get("eligibility"),
             "error": None,
         }
     except Exception:

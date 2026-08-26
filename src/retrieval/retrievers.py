@@ -28,6 +28,12 @@ from langchain_classic.retrievers import (
     EnsembleRetriever,
 )
 from langchain_classic.retrievers.document_compressors import CrossEncoderReranker
+
+# langchain-community warns on import that it is being sunset, and the usual
+# answer is to move to the standalone integration package. There isn't one
+# for this: langchain-huggingface ships embeddings, chat models and pipelines,
+# but no cross-encoder. So this import stays until it does, and the warning is
+# expected rather than a migration nobody got round to.
 from langchain_community.cross_encoders import HuggingFaceCrossEncoder
 from langchain_core.callbacks import CallbackManagerForRetrieverRun
 from langchain_core.documents import Document
@@ -35,7 +41,7 @@ from langchain_core.retrievers import BaseRetriever
 from pydantic import ConfigDict
 
 from config import settings
-from src.embeddings import BGEEmbedder
+from src.embeddings import get_embedder
 from src.vectorstores import PineconeHybridStore
 
 logger = logging.getLogger(__name__)
@@ -106,7 +112,7 @@ class PineconeSparseRetriever(_PineconeRetriever):
 @lru_cache(maxsize=1)
 def get_store() -> PineconeHybridStore:
     """Return the shared Pinecone store, building it once per process."""
-    return PineconeHybridStore(BGEEmbedder())
+    return PineconeHybridStore(get_embedder())
 
 
 @lru_cache(maxsize=1)
