@@ -1,10 +1,8 @@
 """Score the copilot on the task it actually does: assessing a claim.
 
-WHY this is pytest and not RAGAS: every number here is deterministic. A
-payable amount is either Rs 38,000 or it is wrong, and asking an LLM judge
-whether Rs 41,753 is "close enough" would be a worse test than ==. RAGAS
-scores the retrieval quality behind these decisions (evaluation/run_ragas.py);
-this file scores the decisions themselves.
+WHY exact comparison, not an LLM judge: every number here is deterministic. A
+payable amount is either Rs 38,000 or it is wrong, and asking a model whether
+Rs 41,753 is "close enough" would be a worse test than ==.
 
 Each case in evaluation/claims_dataset.json is run through the real engine
 against the real seeded databases and the real retrieval stack, then checked

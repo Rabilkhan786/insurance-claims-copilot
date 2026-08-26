@@ -18,7 +18,6 @@ REQUIRED_SECTIONS = (
     "chunking",
     "api",
     "table_extraction",
-    "observability",
 )
 
 
@@ -56,11 +55,8 @@ class Settings:
     table_extraction_enabled: bool
     table_min_rows: int
     table_min_cols: int
-    langsmith_tracing: bool
-    langsmith_project: str
     pinecone_api_key: str | None
     groq_api_key: str | None
-    langchain_api_key: str | None
 
 
 def _required(mapping: dict[str, Any], key: str) -> Any:
@@ -157,19 +153,11 @@ def _infra_kwargs(root: Path, raw: dict) -> dict:
     }
 
 
-def _observability_kwargs(root: Path, raw: dict) -> dict:
-    """Build Settings fields for tracing and API secrets."""
-    observability = raw["observability"]
+def _secret_kwargs() -> dict:
+    """Build Settings fields for API keys, read from the environment only."""
     return {
-        "langsmith_tracing": bool(observability["langsmith_tracing"]),
-        "langsmith_project": observability["langsmith_project"],
         "pinecone_api_key": os.getenv("PINECONE_API_KEY"),
         "groq_api_key": os.getenv("GROQ_API_KEY"),
-        # LangSmith renamed its env vars from LANGCHAIN_* to LANGSMITH_*;
-        # the langsmith SDK itself accepts either, so this does too.
-        "langchain_api_key": (
-            os.getenv("LANGSMITH_API_KEY") or os.getenv("LANGCHAIN_API_KEY")
-        ),
     }
 
 
@@ -186,7 +174,7 @@ def load_settings() -> Settings:
         **_chunking_kwargs(raw["chunking"]),
         **_table_kwargs(raw["table_extraction"]),
         **_infra_kwargs(root, raw),
-        **_observability_kwargs(root, raw),
+        **_secret_kwargs(),
     )
 
 

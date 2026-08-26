@@ -66,8 +66,3 @@ table_extraction:
   enabled: true
   min_rows: 2
   min_cols: 2
-
-
-observability:
-  langsmith_tracing: true
-  langsmith_project: health-insurance-agent

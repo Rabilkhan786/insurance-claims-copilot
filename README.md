@@ -33,7 +33,7 @@ claim ─▶ SQL: customer, policy, claim history
 | **LangChain** (`create_agent`) | Tool calling: the agent chooses which lookups to run and writes the explanation an employee reads. |
 | **LangGraph** (`StateGraph`) | The stateful claim workflow, and the `interrupt()` that pauses it for human review and resumes it on the same thread. |
 | **The human** | The decision. Always. |
-| **Evaluation** | RAGAS for retrieval quality; pytest for claim correctness; LangSmith for agent and workflow traces. |
+| **Evaluation** | pytest, checking every claim's status and payable amount against a labelled dataset. |
 
 The split between the engine and the model is the design decision the whole
 project turns on. The model is good at reading a clause and explaining a
@@ -86,7 +86,7 @@ nobody ever established.
 | PDF parsing | PyMuPDF |
 | API | FastAPI |
 | Frontend | Streamlit |
-| Evaluation | RAGAS (retrieval) + pytest (claim correctness) |
+| Evaluation | pytest (claim correctness) |
 
 ## Setup
 
@@ -107,13 +107,7 @@ cp .env.example .env
 ```
 GROQ_API_KEY=
 PINECONE_API_KEY=
-LANGSMITH_API_KEY=
-CEREBRAS_API_KEY=
-CEREBRAS_JUDGE_API_KEY=
 ```
-
-`CEREBRAS_*` are only needed to run the RAGAS evaluation. `LANGSMITH_API_KEY`
-is optional; tracing switches itself off without it.
 
 Create and seed the demo databases:
 
@@ -159,10 +153,6 @@ any change to how chunks are tagged, because tags are baked in at index time.
 
 ## Evaluation
 
-Two separate things are measured, because they fail in different ways.
-
-### Claim correctness — pytest
-
 `evaluation/claims_dataset.json` holds 15 labelled claims covering sub-limits,
 co-pays, deductibles, waiting periods, exclusions, an exhausted sum insured, a
 lapsed policy, a customer/policy mismatch, and both kinds of
@@ -173,41 +163,8 @@ uv run pytest tests/test_claims_evaluation.py -v
 ```
 
 A payable amount is either right or wrong, so it is checked with `==`. No LLM
-judge is involved in scoring money or dates.
-
-### Retrieval quality — RAGAS
-
-`evaluation/rag_dataset.json` holds 10 policy-evidence questions, two each for
-waiting periods, coverage, exclusions, sub-limits, and co-pay/deductible
-wording. Every question was written from the actual PDF text with its UIN and
-page recorded.
-
-```bash
-uv run sync --extra evaluation
-uv run python evaluation/run_ragas.py           # full run
-uv run python evaluation/run_ragas.py --smoke   # 1 per topic
-```
-
-Scores are written to `evaluation/baseline_results.json`. A full run takes
-roughly 20 minutes: it spaces calls out to stay inside the provider's rate
-limit.
-
-RAGAS measures faithfulness, answer relevancy, context precision and context
-recall — retrieval, not decisions.
-
-The committed `baseline_results.json` is a 5-question smoke run (one per
-topic) against the current code: faithfulness 1.00, relevancy 0.64, precision
-0.45, recall 0.60. Read those next to the caveats in
-[evaluation/README.md](evaluation/README.md) — faithfulness of 1.00 partly
-reflects that an abstention asserts nothing, and one of the five questions
-abstained. The previous baseline was deleted rather than kept: it predated the
-retrieval fix below and no longer described this code.
-
-### Agent traces — LangSmith
-
-Set `LANGSMITH_API_KEY` and tool selection, tool arguments, and the LangGraph
-workflow trace are all visible per run. Useful for spotting a wasted or
-repeated tool call.
+judge is involved in scoring money or dates — see
+[evaluation/README.md](evaluation/README.md) for why.
 
 ## Known limitations
 
@@ -236,13 +193,11 @@ that does not.
   lexical boost, not a config change.
 - **Long questions retrieve worse than short ones.** Measured, not guessed:
   querying `check_coverage` with `"robotic surgery"` puts the right clause at
-  rank 1, while passing the whole RAGAS question sentence pushes it out of the
-  top 8 entirely — the extra words dilute the embedding and the reranker
-  prefers generic prose. This mostly affects `/chat`, where a user's sentence
-  becomes the query. The claim path is unaffected: it queries with the
-  treatment field, which is already short. **The RAGAS harness has not been
-  tuned around this** — it still passes the full question, so the published
-  scores include the weakness rather than hiding it.
+  rank 1, while passing a full question sentence pushes it out of the top 8
+  entirely — the extra words dilute the embedding and the reranker prefers
+  generic prose. This mostly affects `/chat`, where a user's sentence becomes
+  the query. The claim path is unaffected: it queries with the treatment
+  field, which is already short.
 - **This is not a licensed insurance product.** Results are estimates from
   demo records and public documents, and carry no weight with any insurer.
 
@@ -301,9 +256,7 @@ health-agentic-rag/
     decisions/                SQLite models and stores
     utils/sqlite_store.py     Shared connection and schema bootstrap
   evaluation/
-    claims_dataset.json       15 labelled claims - the main benchmark
-    rag_dataset.json          10 policy-evidence questions
-    run_ragas.py              The RAGAS runner
+    claims_dataset.json       15 labelled claims - the correctness benchmark
   tests/
 ```
 

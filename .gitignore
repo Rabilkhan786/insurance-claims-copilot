@@ -6,6 +6,7 @@ __pycache__/
 
 .env
 .env.*
+!.env.example
 
 venv/
 .venv/
@@ -21,12 +22,10 @@ data/*.db
 
 /test*.py
 *.log
-.ragas_env
 
 .CLAUDE.md
 
 .claude
-eval_run.log
 CLAUDE.md
 BUILD_PLAN.md
 
