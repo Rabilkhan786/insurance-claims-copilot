@@ -1,1 +1,1 @@
-"""Offline evaluation harness for the RAG pipeline's retrieval and answers."""
+"""Claim correctness evaluation -- see evaluation/README.md."""

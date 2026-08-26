@@ -10,7 +10,6 @@ tools via ToolRuntime, so the model never has to ask for an ID it already has.
 from __future__ import annotations
 
 import logging
-import os
 import sqlite3
 from dataclasses import dataclass
 from functools import lru_cache
@@ -157,16 +156,6 @@ class Context:
     customer_id: str | None = None
 
 
-def _configure_langsmith_tracing() -> None:
-    """Enable LangSmith tracing if credentials are present."""
-    if not settings.langsmith_tracing or not settings.langchain_api_key:
-        return
-    for prefix in ("LANGCHAIN", "LANGSMITH"):
-        os.environ.setdefault(f"{prefix}_TRACING_V2", "true")
-        os.environ.setdefault(f"{prefix}_PROJECT", settings.langsmith_project)
-        os.environ.setdefault(f"{prefix}_API_KEY", settings.langchain_api_key)
-
-
 @lru_cache(maxsize=1)
 def get_checkpointer() -> SqliteSaver:
     """Return the one thread store, so memory survives a restart.
@@ -208,7 +197,6 @@ def _build_agent(system_prompt, tools=ALL_TOOLS, response_format=None):
     """
     if not settings.groq_api_key:
         raise RuntimeError("GROQ_API_KEY is required for the agent")
-    _configure_langsmith_tracing()
 
     agent = create_agent(
         model=ChatGroq(
