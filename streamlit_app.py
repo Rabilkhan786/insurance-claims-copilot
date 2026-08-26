@@ -177,6 +177,27 @@ def render_breakdown(recommendation: dict) -> None:
         st.caption(f"Deciding check: {recommendation['reason_summary']}")
 
 
+def _fact_value(value) -> str:
+    """Render one fact's value as a single string.
+
+    A fact's value is a bool (coverage), a float (sub_limit, copay,
+    remaining sum insured), or None (not_applicable / unknown) depending on
+    which fact it is. Handing that mix straight to st.dataframe put all
+    three in one column; PyArrow inferred a boolean column from the
+    True/False rows, then failed converting the floats and "-" placeholders
+    into it. Streamlit caught the exception and silently coerced the table,
+    but every render was throwing a full traceback into the server log.
+    A single string type sidesteps the inference entirely.
+    """
+    if value is None:
+        return "-"
+    if isinstance(value, bool):
+        return "Yes" if value else "No"
+    if isinstance(value, float):
+        return f"{value:,.2f}".rstrip("0").rstrip(".")
+    return str(value)
+
+
 def render_facts(recommendation: dict) -> None:
     """Show every policy fact the engine resolved, and how it resolved it.
 
@@ -194,7 +215,7 @@ def render_facts(recommendation: dict) -> None:
             {
                 "Fact": fact["name"].replace("_", " ").title(),
                 "Status": FACT_STATUS_DISPLAY.get(fact["status"], fact["status"]),
-                "Value": fact.get("value") if fact.get("value") is not None else "-",
+                "Value": _fact_value(fact.get("value")),
                 "Source": fact.get("source", "-"),
                 "Detail": fact.get("detail", ""),
             }

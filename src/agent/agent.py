@@ -150,11 +150,26 @@ def get_checkpointer() -> SqliteSaver:
     duplicate persistence that makes a resumed interrupt hard to reason about.
 
     check_same_thread=False because FastAPI serves requests from a threadpool.
+
+    The explicit serde: get_claims_agent()'s response_format=ClaimExplanation
+    means review_node's state -- checkpointed on every interrupt() so a
+    resume can rebuild it -- carries that Pydantic type. LangGraph's default
+    serializer allows any custom type through with a warning ("this will be
+    blocked in a future version"), because loading an unrecognised type from
+    an untrusted checkpoint file is a code-execution risk it does not want to
+    take silently. Registering ClaimExplanation by name is the supported way
+    to say this one is expected, rather than leaving every checkpoint load on
+    the permissive-with-a-warning path.
     """
+    from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+
+    from src.agent.recommendation import ClaimExplanation
+
     checkpoint_path = settings.root_dir / "data" / "checkpoints.db"
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(str(checkpoint_path), check_same_thread=False)
-    return SqliteSaver(connection)
+    serde = JsonPlusSerializer(allowed_msgpack_modules=[ClaimExplanation])
+    return SqliteSaver(connection, serde=serde)
 
 
 def _build_agent(tools=ALL_TOOLS, response_format=None):
