@@ -193,11 +193,6 @@ def detect_topics(text: str) -> list[str]:
     return sorted(kept, key=lambda topic: -scores[topic])
 
 
-def detect_topic(text: str) -> str:
-    """Return the single strongest topic, for callers that want just one."""
-    return detect_topics(text)[0]
-
-
 def is_boilerplate(line: str) -> bool:
     """Return True for office addresses, registration numbers and hotlines."""
     lowered = line.lower()

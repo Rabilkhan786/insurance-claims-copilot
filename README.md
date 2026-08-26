@@ -214,7 +214,7 @@ repeated tool call.
 Stated plainly, because a portfolio project that hides them is worse than one
 that does not.
 
-- **Only the seeded demo customers exist.** Five customers and five policies,
+- **Only the seeded demo customers exist.** Five customers and six policies,
   in `Data/seed.py`. The policy *facts* seeded for them (sub-limits, waiting
   periods, co-pay) are transcribed from the real PDFs, with one exception,
   marked in the file: the New India top-up deductible is a representative
@@ -313,6 +313,18 @@ health-agentic-rag/
 the tool-calling loop and nothing here hand-rolls it. `src/agent/workflow.py`
 is a LangGraph `StateGraph` with the compiled agent added as a node. The
 workflow owns persistence; the agent inherits its checkpointer as a subgraph.
+
+**Two agent instances, one builder.** Chat and claim explanation need
+different shapes of answer, so `agent.py` builds two: `get_agent()` for
+`/chat` (free text, full tool access) and `get_claims_agent()` for the review
+node (`response_format=ClaimExplanation`, no tools). The second is
+structured output via `create_agent`'s own contract, not hand-parsed text —
+`review_node` reads `state["structured_response"].reasoning` directly. It has
+no tools because Groq's API refuses to combine JSON response format with
+tool calling in one call; that node was never the one doing lookups anyway,
+since the prompt already hands it the finished eligibility result. Even with
+structured output, `status` and `payable_amount` are not fields the model is
+asked to fill in — see `ClaimRecommendation.from_engine()`.
 
 **Human review is `interrupt()`.** No hand-rolled "awaiting approval" flag. The
 graph stops, checkpoints itself, and hands back the recommendation. The UI

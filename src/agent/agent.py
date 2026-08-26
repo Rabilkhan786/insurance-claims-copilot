@@ -157,9 +157,12 @@ def get_checkpointer() -> SqliteSaver:
     return SqliteSaver(connection)
 
 
-@lru_cache(maxsize=1)
-def get_agent():
-    """Return the compiled agent, building it once per process."""
+def _build_agent(tools=ALL_TOOLS, response_format=None):
+    """Build one compiled agent. Shared by the chat and claim variants below.
+
+    tools and response_format are the only things that differ between them --
+    model, prompt and middleware are identical either way.
+    """
     if not settings.groq_api_key:
         raise RuntimeError("GROQ_API_KEY is required for the agent")
     _configure_langsmith_tracing()
@@ -174,9 +177,10 @@ def get_agent():
             # stream_mode="messages" paint the answer word by word.
             streaming=True,
         ),
-        tools=ALL_TOOLS,
+        tools=tools,
         system_prompt=SYSTEM_PROMPT,
         context_schema=Context,
+        response_format=response_format,
         # No checkpointer here on purpose -- see get_checkpointer().
         middleware=[
             # Groq validates tool names server-side and raises an APIError for
@@ -190,5 +194,44 @@ def get_agent():
             ),
         ],
     )
-    logger.info("agent_built tools=%s model=%s", len(ALL_TOOLS), settings.llm_model)
+    logger.info(
+        "agent_built tools=%s model=%s structured=%s",
+        len(tools or []), settings.llm_model, response_format is not None,
+    )
     return agent
+
+
+@lru_cache(maxsize=1)
+def get_agent():
+    """The chat agent: free-text replies, for /chat and run_agent().
+
+    Full tool access, no response_format -- a chat answer is prose, not one
+    fixed shape, and stream_agent() reads token-by-token AIMessage chunks
+    that structured output does not produce the same way.
+    """
+    return _build_agent()
+
+
+@lru_cache(maxsize=1)
+def get_claims_agent():
+    """The claim-explanation agent: structured replies, for the review node.
+
+    Two differences from get_agent(), and they are linked, not incidental:
+
+    response_format=ClaimExplanation makes the model's reply validated JSON
+    instead of free text, which review_node reads directly from
+    state["structured_response"].reasoning -- no scanning the message list
+    for the last AIMessage. status and payable_amount are not part of the
+    schema the model fills in; see ClaimExplanation for why.
+
+    tools=None: Groq's API rejects a request that combines its JSON
+    response-format mode with function/tool calling in the same call --
+    "json mode cannot be combined with tool/function calling". This node
+    does not lose anything by going tool-less: WRITE_RECOMMENDATION_PROMPT
+    already hands it the finished eligibility dict, evidence and all, so its
+    only job is turning that dict into readable prose. It was never the node
+    that looks anything up.
+    """
+    from src.agent.recommendation import ClaimExplanation
+
+    return _build_agent(tools=None, response_format=ClaimExplanation)

@@ -28,7 +28,7 @@ from langgraph.runtime import Runtime
 from langgraph.types import Command, interrupt
 
 from config import settings
-from src.agent.agent import Context, get_agent, get_checkpointer
+from src.agent.agent import Context, get_agent, get_checkpointer, get_claims_agent
 from src.agent.recommendation import ClaimRecommendation
 from src.decisions import DecisionStore
 from src.eligibility import check_eligibility
@@ -47,6 +47,11 @@ class WorkflowState(MessagesState, total=False):
     # runtime.context is None in every node after the interrupt.
     customer_id: str | None
     eligibility: dict[str, Any] | None
+    # Written by explain_claim (the structured-output agent), read once by
+    # review_node and never touched again. ClaimExplanation, not
+    # ClaimRecommendation -- see recommendation.py for why the two are
+    # different shapes.
+    structured_response: Any | None
     # The typed ClaimRecommendation, flattened. Built once in review_node so
     # the payload the employee saw is exactly what the audit row stores.
     recommendation: dict[str, Any] | None
@@ -70,9 +75,13 @@ be established before one can be calculated, and do not invent a figure.
 the exact format [Source: {{insurer}}, UIN: {{uin}}, Page {{page}}].
 4. Anything missing that the employee should chase before deciding.
 
-Read the per-fact statuses before you write. "unknown" means the fact was \
-never established -- never report it as zero or as not applying. \
-"not_applicable" does mean the policy states no such condition.
+Read the per-fact statuses before you write. Only "unknown" belongs under \
+"Missing information" or as something you "could not find" -- that status \
+means the fact was never established. A "not_applicable" fact is the \
+opposite: it means the policy was checked and confirmed to state no such \
+condition. Report it as a finding in section 3, in the same words as its \
+detail (e.g. "this plan carries no deductible; it pays from rupee one"), \
+never as something absent or unlocatable.
 
 This is a recommendation for a human to review, never a final answer. Do not \
 write "the claim is approved" -- write "recommend: approve".
@@ -136,6 +145,22 @@ def eligibility_node(state: WorkflowState, runtime: Runtime[Context]) -> dict:
     }
 
 
+def _explanation_text(state: WorkflowState) -> str:
+    """Read the model's prose, structured output first.
+
+    explain_claim runs with response_format=ClaimExplanation, so its answer
+    lands in structured_response.reasoning rather than as a plain AIMessage
+    -- no scanning the message list for the last one. The messages-based
+    fallback exists for the state a caller builds by hand (this file's own
+    tests stub the agent node without response_format), not for anything the
+    real graph produces.
+    """
+    structured = state.get("structured_response")
+    if structured is not None:
+        return _normalise_citations(structured.reasoning)
+    return _last_ai_text(state.get("messages", []))
+
+
 def review_node(state: WorkflowState) -> dict:
     """Hand the recommendation to the employee and wait for their call.
 
@@ -148,7 +173,7 @@ def review_node(state: WorkflowState) -> dict:
     """
     recommendation = ClaimRecommendation.from_engine(
         state.get("eligibility") or {},
-        reasoning=_last_ai_text(state.get("messages", [])),
+        reasoning=_explanation_text(state),
     )
     print(f"review_node: pausing for employee review ({recommendation.status})")
 
@@ -198,13 +223,13 @@ def _route_entry(state: WorkflowState) -> str:
 
 
 def _after_eligibility(state: WorkflowState) -> str:
-    """Only ask the agent to explain a decision that was actually produced."""
-    return END if state.get("error") else "agent"
+    """Only ask for an explanation of a decision that was actually produced.
 
-
-def _after_agent(state: WorkflowState) -> str:
-    """Only the claim path gets reviewed; a chat answer just ends."""
-    return "review" if state.get("eligibility") else END
+    explain_claim always leads to review once reached -- there is no longer
+    a branch here for "explained, but not actually a claim", because the two
+    tasks now run on two different nodes instead of one shared one.
+    """
+    return END if state.get("error") else "explain_claim"
 
 
 _workflow = None
@@ -217,7 +242,14 @@ def get_workflow():
         builder = StateGraph(WorkflowState, context_schema=Context)
 
         builder.add_node("eligibility", eligibility_node)
+        # Two agent instances, not one: explain_claim runs with
+        # response_format=ClaimExplanation (see get_claims_agent), so its
+        # reply is validated JSON review_node reads directly. agent stays
+        # free text -- chat is prose, and stream_agent() reads token-by-token
+        # AIMessage chunks that structured output does not produce the same
+        # way.
         builder.add_node("agent", get_agent())
+        builder.add_node("explain_claim", get_claims_agent())
         builder.add_node("review", review_node)
         builder.add_node("persist_decision", persist_decision_node)
 
@@ -225,11 +257,10 @@ def get_workflow():
             START, _route_entry, {"eligibility": "eligibility", "agent": "agent"}
         )
         builder.add_conditional_edges(
-            "eligibility", _after_eligibility, {"agent": "agent", END: END}
+            "eligibility", _after_eligibility, {"explain_claim": "explain_claim", END: END}
         )
-        builder.add_conditional_edges(
-            "agent", _after_agent, {"review": "review", END: END}
-        )
+        builder.add_edge("explain_claim", "review")
+        builder.add_edge("agent", END)
         builder.add_edge("review", "persist_decision")
         builder.add_edge("persist_decision", END)
 

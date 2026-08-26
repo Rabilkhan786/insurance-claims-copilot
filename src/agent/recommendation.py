@@ -23,6 +23,32 @@ from pydantic import BaseModel, Field
 
 from src.eligibility import ELIGIBLE, INELIGIBLE, NEEDS_MORE_INFO
 
+
+class ClaimExplanation(BaseModel):
+    """What the model is asked to produce, via create_agent's response_format.
+
+    WHY only one field: response_format is LangChain's structured-output
+    contract, so the model's reply is validated JSON instead of free text --
+    that is genuinely useful, it replaces manually scanning the message list
+    for the last AIMessage. But the shape stops at reasoning. status and
+    payable_amount are not asked of the model at all, on the same principle
+    as ClaimRecommendation.from_engine(): a field the model is never asked to
+    produce is a field it cannot get wrong. Giving it a status field to fill
+    in, only to discard whatever it wrote, would just be a more elaborate way
+    of asking it to guess.
+    """
+
+    reasoning: str = Field(
+        description=(
+            "Structure: 1) Recommend: approve/reject/needs more info, and "
+            "why, in one sentence. 2) The payable amount and which "
+            "deduction reduced it, or what is missing if there is none yet. "
+            "3) The policy clauses that support it, each with its citation "
+            "[Source: {insurer}, UIN: {uin}, Page {page}]. 4) Anything "
+            "missing, or 'None'."
+        )
+    )
+
 # The engine says what is true of the claim; the employee-facing recommendation
 # says what to do about it. They are different vocabularies on purpose.
 ENGINE_STATUS_TO_RECOMMENDATION = {
