@@ -65,13 +65,20 @@ def _policies_for(customer_id: str) -> list[dict]:
 
 
 def _init_state() -> None:
-    """Session state: one pending review at a time."""
+    """Session state: one pending review at a time, plus a running chat."""
     if "session_id" not in st.session_state:
         st.session_state.session_id = str(uuid4())
     if "review" not in st.session_state:
         st.session_state.review = None
     if "saved" not in st.session_state:
         st.session_state.saved = None
+    # A separate thread from the claim review above: chat and claim analysis
+    # are two different graph runs, and sharing one session_id would mix a
+    # customer's chat history into the claim's paused review state.
+    if "chat_session_id" not in st.session_state:
+        st.session_state.chat_session_id = str(uuid4())
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = []
 
 
 def _money(value) -> str:
@@ -163,6 +170,46 @@ def render_claim_form() -> None:
             customer_id,
             policy_id,
         )
+
+
+def render_chat() -> None:
+    """A general Q&A box -- separate from the claim form above.
+
+    Not every question an employee has is "assess this claim" -- sometimes
+    it's just "what's this customer's remaining sum insured". This calls the
+    same agent that handles that, with memory: it remembers earlier turns in
+    this chat because every call reuses one chat_session_id.
+    """
+    from src.agent import run_agent
+
+    customers = _customers()
+    if not customers:
+        return
+
+    st.subheader("Ask a question")
+    labels = {f"{c['customer_id']} - {c['name']}": c["customer_id"] for c in customers}
+    chosen = st.selectbox("About which customer?", list(labels), key="chat_customer")
+    customer_id = labels[chosen]
+
+    with st.form("chat_form", clear_on_submit=True):
+        question = st.text_input(
+            "Question", placeholder="e.g. What is this customer's remaining sum insured?"
+        )
+        asked = st.form_submit_button("Ask")
+
+    if asked and question.strip():
+        with st.spinner("Thinking..."):
+            result = run_agent(
+                question, st.session_state.chat_session_id, customer_id
+            )
+        answer = result.get("error") or result.get("answer") or "No answer."
+        st.session_state.chat_history.append((question, answer))
+
+    for asked_question, answer in reversed(st.session_state.chat_history):
+        with st.chat_message("user"):
+            st.write(asked_question)
+        with st.chat_message("assistant"):
+            st.write(answer)
 
 
 def render_breakdown(recommendation: dict) -> None:
@@ -387,6 +434,8 @@ def main() -> None:
     if st.session_state.saved:
         st.success(f"Decision recorded: {st.session_state.saved}")
 
+    render_chat()
+    st.divider()
     render_claim_form()
     render_review_panel(employee)
 
