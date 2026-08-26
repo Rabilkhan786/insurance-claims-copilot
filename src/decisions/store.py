@@ -15,16 +15,21 @@ logger = logging.getLogger(__name__)
 # The three calls the employee can make on a recommendation.
 EMPLOYEE_DECISIONS = ("approve", "edit", "reject")
 
+# What the copilot can recommend. Matches the CHECK constraint on the table
+# and ClaimRecommendation.status -- one vocabulary, three places it is used.
+AI_DECISIONS = ("approve", "reject", "needs_more_info")
+
 
 def _ai_decision_from(recommendation: dict) -> str:
-    """Turn the eligibility engine's result into the AI's headline call.
+    """Read the AI's headline call off the recommendation it produced.
 
-    The engine answers eligible True/False. "needs_more_info" is the third
-    case: it ran, but could not find the evidence to justify either answer.
+    ClaimRecommendation.status already speaks this vocabulary -- approve,
+    reject, needs_more_info -- because the engine's three states were mapped
+    into it when the recommendation was built. Nothing is re-derived here;
+    re-deriving it was how the audit row and the screen once disagreed.
     """
-    if recommendation.get("needs_more_info"):
-        return "needs_more_info"
-    return "approve" if recommendation.get("eligible") else "reject"
+    status = recommendation.get("status")
+    return status if status in AI_DECISIONS else "needs_more_info"
 
 
 class DecisionStore(SqliteStore):
@@ -88,7 +93,7 @@ class DecisionStore(SqliteStore):
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     decision_id, claim_id, customer_id, policy_id, ai_decision,
-                    recommendation.get("estimated_payable"),
+                    recommendation.get("payable_amount"),
                     json.dumps(recommendation, default=str),
                     employee_decision, employee_payable_amount, employee_edits,
                     override_reason, agreed, decided_by,

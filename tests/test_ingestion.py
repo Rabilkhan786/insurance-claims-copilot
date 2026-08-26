@@ -203,3 +203,49 @@ def test_page_parser_returns_the_page_text():
     document.close()
 
     assert "Cataract surgery" in text
+
+
+# --- table type -> retrieval topics ---------------------------------------
+# WHY these exist: a table's type names the shape of the table in the PDF
+# ("modern_treatment"), while the RAG tools filter on the topic vocabulary the
+# chunker uses for prose ("coverage"). The pipeline used to write the table
+# type straight into `topics`, so table rows were indexed under labels no tool
+# ever asks for -- present in Pinecone, correct, citable, and unreachable.
+def test_every_table_type_maps_onto_a_topic_a_tool_searches_for():
+    """The two vocabularies have to meet, or whole tables go missing."""
+    from src.ingestion.table_classifier import TABLE_TYPE_TOPICS
+    from src.tools.rag_tools import COVERAGE_TOPICS
+
+    searchable = set(COVERAGE_TOPICS) | {
+        "exclusion", "waiting_period", "definition", "claim_procedure", "general",
+    }
+
+    for table_type, topics in TABLE_TYPE_TOPICS.items():
+        assert topics, f"{table_type} maps to no topic at all"
+        unreachable = set(topics) - searchable
+        assert not unreachable, (
+            f"{table_type} is indexed under {unreachable}, which no tool filters on"
+        )
+
+
+def test_modern_treatment_rows_are_findable_as_coverage():
+    """The regression case: a robotic-surgery row must answer a coverage query."""
+    from src.ingestion.table_classifier import retrieval_topics
+    from src.tools.rag_tools import COVERAGE_TOPICS
+
+    assert set(retrieval_topics("modern_treatment")) & set(COVERAGE_TOPICS)
+
+
+def test_copayment_rows_are_findable_by_the_coverage_tool():
+    """The engine resolves co-pay through check_coverage, so it has to reach them."""
+    from src.ingestion.table_classifier import retrieval_topics
+    from src.tools.rag_tools import COVERAGE_TOPICS
+
+    assert set(retrieval_topics("copayment")) & set(COVERAGE_TOPICS)
+
+
+def test_an_unmapped_table_type_falls_back_to_general_not_to_itself():
+    """Better unfiltered than filed under a label nothing searches for."""
+    from src.ingestion.table_classifier import retrieval_topics
+
+    assert retrieval_topics("some_new_table_shape") == ["general"]

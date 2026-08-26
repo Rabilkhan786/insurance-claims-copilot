@@ -1,4 +1,4 @@
-"""Public exports for the embedding subpackage."""
-from .bge import BGEEmbedder
+"""Public exports for the embeddings subpackage."""
+from .bge import get_embedder
 
-__all__ = ["BGEEmbedder"]
+__all__ = ["get_embedder"]

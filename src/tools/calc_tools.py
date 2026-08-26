@@ -1,8 +1,8 @@
 """Agent-facing calculation tools — pure Python, no LLM.
 
 The LLM never does arithmetic on money or dates in this project. It calls
-these functions and reports their results, so a customer sees the same
-number every time they ask the same question.
+these functions and reports their results, so the same claim produces the
+same figure every time it is assessed, and the audit trail can be replayed.
 """
 from __future__ import annotations
 
@@ -12,28 +12,8 @@ from datetime import date, datetime
 from langchain.tools import ToolRuntime
 from langchain_core.tools import tool
 
-from config import settings
-from src.crm import CRMStore
-from src.policy_data import PolicyDataStore
-
-_crm_store: CRMStore | None = None
-_policy_store: PolicyDataStore | None = None
-
-
-def _get_crm_store() -> CRMStore:
-    """Return the shared CRMStore, building it once on first use."""
-    global _crm_store
-    if _crm_store is None:
-        _crm_store = CRMStore(settings.crm_db_path)
-    return _crm_store
-
-
-def _get_policy_store() -> PolicyDataStore:
-    """Return the shared PolicyDataStore, building it once on first use."""
-    global _policy_store
-    if _policy_store is None:
-        _policy_store = PolicyDataStore(settings.crm_db_path)
-    return _policy_store
+from src.crm import get_crm_store
+from src.policy_data import get_policy_store
 
 
 def _parse_date(value: str | date) -> date:
@@ -83,20 +63,20 @@ def waiting_period_tracker(
     runtime: ToolRuntime,
     waiting_period_months: int | None = None,
 ) -> dict:
-    """Give the exact date cover for a condition begins on the signed-in
-    customer's policy, returning eligible_date, days_remaining and is_eligible.
+    """Give the exact date cover for a condition begins on this customer's
+    policy, returning eligible_date, days_remaining and is_eligible.
     Pass policy_id from get_policies and the condition (e.g. maternity,
     cataract). The waiting period is looked up automatically — only pass
     waiting_period_months if a clause stated a number this policy's records
     lack. Always finish a waiting-period question with this tool."""
-    policy = _get_crm_store().get_policy(policy_id)
+    policy = get_crm_store().get_policy(policy_id)
     if policy is None or policy["customer_id"] != runtime.context.customer_id:
         return {"error": "Policy not found for this customer."}
 
     # Most waiting periods live in a table that was routed to SQL, not in the
     # clause text, so the number usually has to come from here.
     if waiting_period_months is None:
-        record = _get_policy_store().find_waiting_period(
+        record = get_policy_store().find_waiting_period(
             policy["policy_number"], condition
         )
         if record is None:
@@ -123,14 +103,14 @@ def compute_sum_insured_balance(policy_id: str, customer_id: str) -> dict:
     WHY separate from the tool below: the engine already knows the customer_id
     and runs outside any agent turn, so it has no ToolRuntime to read from.
     """
-    policy = _get_crm_store().get_policy(policy_id)
+    policy = get_crm_store().get_policy(policy_id)
     if policy is None or policy["customer_id"] != customer_id:
         return {"error": "Policy not found for this customer."}
 
     start = _parse_date(policy["start_date"])
     end = _parse_date(policy["end_date"])
 
-    claims = _get_crm_store().get_claims(customer_id, policy_id)
+    claims = get_crm_store().get_claims(customer_id, policy_id)
     claims_used = sum(
         claim["eligible_amount"] or claim["claim_amount"]
         for claim in claims
@@ -144,8 +124,8 @@ def compute_sum_insured_balance(policy_id: str, customer_id: str) -> dict:
     # top-up customer their whole bill was payable when the deductible
     # actually left them nothing.
     policy_uin = policy["policy_number"]
-    deductible_row = _get_policy_store().find_deductible(policy_uin)
-    copayments = _get_policy_store().get_copayments(policy_uin)
+    deductible_row = get_policy_store().find_deductible(policy_uin)
+    copayments = get_policy_store().get_copayments(policy_uin)
 
     sum_insured = policy["sum_insured"]
     return {
@@ -159,7 +139,7 @@ def compute_sum_insured_balance(policy_id: str, customer_id: str) -> dict:
 
 @tool
 def sum_insured_balance(policy_id: str, runtime: ToolRuntime) -> dict:
-    """Report what the signed-in customer's policy still pays: sum_insured,
+    """Report what this customer's policy still pays: sum_insured,
     claims_used, remaining_balance, plus the policy's deductible and
     copay_percent. Call this before calculate_payable_amount and pass its
     deductible and copay_percent straight through — they are often non-zero.
@@ -168,7 +148,7 @@ def sum_insured_balance(policy_id: str, runtime: ToolRuntime) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# 5. Payable amount
+# 3. Payable amount
 # ---------------------------------------------------------------------------
 def _apply_deductions(
     covered_amount: float,

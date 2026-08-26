@@ -21,6 +21,7 @@ from .table_classifier import (
     SQL_AND_PINECONE,
     SQL_ONLY,
     classify_table,
+    retrieval_topics,
 )
 from .table_converter import table_to_rows, table_to_sentences
 
@@ -170,9 +171,11 @@ def _table_documents(
         "page": page,
         "section": table_type,
         # topic is the single label used in citations; topics is what the
-        # retrieval filter matches on, so both have to be present.
+        # retrieval filter matches on. They are deliberately different
+        # vocabularies -- see TABLE_TYPE_TOPICS for why writing the table
+        # type into `topics` made whole tables unreachable.
         "topic": table_type,
-        "topics": [table_type],
+        "topics": retrieval_topics(table_type),
         "chunk_type": "table_sentence",
     }
     return [
@@ -409,10 +412,10 @@ def run_pipeline(push_to_pinecone: bool = True) -> dict:
 
     if push_to_pinecone and all_documents:
         print(f"\nEmbedding and upserting {len(all_documents)} documents...")
-        from src.embeddings import BGEEmbedder
+        from src.embeddings import get_embedder
         from src.vectorstores import PineconeHybridStore
 
-        store = PineconeHybridStore(BGEEmbedder())
+        store = PineconeHybridStore(get_embedder())
         store.ensure_indexes()
         store.index_documents(all_documents)
         print("Upsert complete.")

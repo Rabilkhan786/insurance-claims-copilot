@@ -1,13 +1,21 @@
-"""Run the RAGAS evaluation suite against evaluation/dataset.json.
+"""Run the RAGAS evaluation suite against evaluation/rag_dataset.json.
 
 Usage:  uv run python evaluation/run_ragas.py
         uv run python evaluation/run_ragas.py --smoke   (1 per topic)
 
-The dataset is 10 questions, 2 per topic. Both the answers and the judge use
-Groq openai/gpt-oss-120b -- the only model this project runs. NOTE: this
-means the judge scores answers from its own model, which self-grading bias
-can inflate (faithfulness and relevancy read higher than a different-model
-judge would give). Treat these scores as directional, not absolute.
+WHAT THIS MEASURES, AND WHAT IT DOES NOT: this scores the retrieval half of
+the copilot -- can it find the clause that answers a question about a policy,
+and does its answer stay faithful to what was retrieved. It says nothing
+about whether a claim was assessed correctly. Claim decisions and payable
+amounts are deterministic, so they are scored by exact comparison in
+tests/test_claims_evaluation.py against evaluation/claims_dataset.json. An
+LLM judge has no business ruling on whether Rs 38,000 is the right figure.
+
+The dataset is 10 questions, 2 per clause type. Answers and judging both run
+gpt-oss-120b on Cerebras, on two separate keys. NOTE: the judge scores
+answers from its own model, which self-grading bias can inflate
+(faithfulness and relevancy read higher than a different-model judge would
+give). Treat these scores as directional, not absolute.
 
 Each question is scored individually so rate-limit delays and retries are
 per-question rather than per-batch. Scores are saved to
@@ -34,31 +42,63 @@ from tenacity import (
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-DATASET_PATH = ROOT / "evaluation" / "dataset.json"
+DATASET_PATH = ROOT / "evaluation" / "rag_dataset.json"
 BASELINE_PATH = ROOT / "evaluation" / "baseline_results.json"
 
-# The only model this project runs: Groq openai/gpt-oss-120b. Used for both
-# answer generation and judging.
-EVAL_MODEL = "openai/gpt-oss-120b"
+# Answers and judging both run on gpt-oss-120b, but through Cerebras rather
+# than Groq.
+#
+# WHY: RAGAS scores one question with roughly fifty calls -- it splits the
+# answer into claims, judges every retrieved chunk separately, and re-derives
+# questions from the answer. Groq's free tier refused 120 of 275 requests on
+# the last attempt, which leaves metrics as nan and makes the average
+# meaningless. Cerebras speaks the same OpenAI protocol, so only the base URL
+# and key change.
+#
+# The judge uses a second key so answering and judging draw on separate rate
+# limit buckets, which is how the original 19 August baseline got through.
+EVAL_MODEL = "gpt-oss-120b"
+CEREBRAS_BASE_URL = "https://api.cerebras.ai/v1"
+
+# gpt-oss-120b spends tokens on internal reasoning before it writes anything,
+# so a small cap returns an empty string rather than a short answer.
+EVAL_MAX_TOKENS = 2048
+
+
+def _cerebras_llm(key_env: str, temperature: float = 0):
+    """Build a chat model pointed at Cerebras' OpenAI-compatible endpoint."""
+    import os
+
+    from langchain_openai import ChatOpenAI
+
+    key = os.getenv(key_env) or os.getenv("CEREBRAS_API_KEY")
+    if not key:
+        raise RuntimeError(f"{key_env} (or CEREBRAS_API_KEY) is required to evaluate")
+    return ChatOpenAI(
+        api_key=key,
+        base_url=CEREBRAS_BASE_URL,
+        model=EVAL_MODEL,
+        temperature=temperature,
+        max_tokens=EVAL_MAX_TOKENS,
+    )
+
 
 # Capping retrieved context at 3,000 tokens keeps judge prompts reasonable.
 MAX_CONTEXT_CHARS = 12_000
 
-# 20 seconds between questions keeps Groq under its tokens-per-minute limit
-# on the free tier.
+# Spacing between questions, to stay under the provider's per-minute limit.
 EVAL_DELAY_SECONDS = 20
 
 # Spacing between answer-generation calls, same reason.
 ANSWER_DELAY_SECONDS = 10
 
-# Groq's free tier caps tokens per minute, so a 429 means waiting out the
-# window -- 60 seconds clears it.
+# A 429 means the per-minute window is full; waiting it out clears it.
 RETRY_WAIT_SECONDS = 60
 MAX_RETRIES = 3
 
 
 def _is_rate_limit(error: BaseException) -> bool:
-    """True for a Groq 429, whatever exception type it arrives wrapped in."""
+    """True for a rate-limit refusal, whatever type it arrives wrapped in."""
     text = str(error).lower()
     return "429" in text or "rate_limit" in text
 
@@ -80,7 +120,7 @@ METRIC_LABELS = {
     "context_recall": "Recall",
 }
 
-EVAL_TOPICS = ["waiting_period", "coverage", "exclusion", "sub_limit", "comparison"]
+EVAL_TOPICS = ["waiting_period", "coverage", "exclusion", "sub_limit", "copay_deductible"]
 
 # Stricter prompt for evaluation: every stated fact must come from the context.
 # The production prompt allows conversational hedging that RAGAS faithfulness
@@ -91,11 +131,6 @@ Do not add any information from general knowledge.
 Do not hedge, guess, or infer beyond what the context says.
 If the answer is not in the context, reply exactly: The context does not contain information about this.
 Quote relevant numbers or policy terms exactly as they appear.
-When comparing two or more policies, structure your answer as follows:
-- Name and UIN of each policy on a separate line
-- The specific value for each policy with exact numbers
-- A brief summary sentence stating which is better and why
-- Source citations for each policy separately
 
 CONTEXT:
 {context}"""
@@ -116,32 +151,25 @@ def _patch_ragas_compat() -> None:
 
 _patch_ragas_compat()
 
-from config import settings  # noqa: E402
-from src.embeddings import BGEEmbedder  # noqa: E402
+from src.embeddings import get_embedder  # noqa: E402
+from src.policy_data import get_policy_store  # noqa: E402
 from src.tools.rag_tools import (  # noqa: E402
     check_coverage,
     check_exclusion,
     check_waiting_period,
 )
-from src.policy_data import PolicyDataStore  # noqa: E402
 from src.utils import configure_logging  # noqa: E402
 
 
 class _AnswerGenerator:
-    """Groq gpt-oss-120b answer generator using the strict eval-only prompt.
+    """Cerebras gpt-oss-120b answer generator, strict eval-only prompt.
 
     Same model that judges the answers below (see the module docstring for
     the self-grading-bias tradeoff that comes with that).
     """
 
     def __init__(self) -> None:
-        from langchain_groq import ChatGroq
-
-        self.model = ChatGroq(
-            api_key=settings.groq_api_key,
-            model=EVAL_MODEL,
-            temperature=0,
-        )
+        self.model = _cerebras_llm("CEREBRAS_API_KEY")
 
     def answer(self, question: str, context: str) -> str:
         from langchain_core.prompts import ChatPromptTemplate
@@ -152,19 +180,6 @@ class _AnswerGenerator:
         ])
         messages = prompt.format_messages(context=context, question=question)
         return _retry_on_rate_limit(self.model.invoke)(messages).content
-
-
-class _BGELangchainEmbeddings:
-    """Adapts BGEEmbedder to the LangChain Embeddings interface RAGAS expects."""
-
-    def __init__(self) -> None:
-        self._embedder = BGEEmbedder()
-
-    def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        return self._embedder.embed_documents(texts).tolist()
-
-    def embed_query(self, text: str) -> list[float]:
-        return self._embedder.embed_query(text)
 
 
 def load_dataset() -> list[dict]:
@@ -204,26 +219,6 @@ def _truncate_contexts(contexts: list[str]) -> list[str]:
     return result
 
 
-def _effective_topic(question: str, topic: str) -> str:
-    """Resolve "comparison" to the topic the question is really about.
-
-    "comparison" describes the shape of a question, not the kind of clause it
-    needs. Routing every comparison to check_coverage filtered Pinecone to
-    topic in (coverage, sub_limit), so a question comparing two waiting
-    periods could never reach a waiting_period chunk and always abstained --
-    even though the clause was indexed and reachable.
-    """
-    if topic != "comparison":
-        return topic
-
-    text = (question or "").lower()
-    if "waiting period" in text or "waiting-period" in text:
-        return "waiting_period"
-    if "exclu" in text or "not covered" in text:
-        return "exclusion"
-    return "coverage"
-
-
 def _retrieve_for_topic(question: str, topic: str, policy_uin: str) -> list[dict]:
     """Retrieve with the same tool the live agent would pick for this question.
 
@@ -232,13 +227,11 @@ def _retrieve_for_topic(question: str, topic: str, policy_uin: str) -> list[dict
     to check_exclusion, and so on, each filtering Pinecone by topic metadata.
     Evaluating through generic search measured a path the product never uses.
     """
-    effective = _effective_topic(question, topic)
-
-    if effective == "waiting_period":
+    if topic == "waiting_period":
         return check_waiting_period.invoke(
             {"condition": question, "policy_uin": policy_uin}
         )
-    if effective == "exclusion":
+    if topic == "exclusion":
         # The bare question ranks general clauses above the exclusion list.
         # Adding the vocabulary an exclusion clause actually uses gives the
         # reranker a stronger signal for the specific clause.
@@ -248,12 +241,9 @@ def _retrieve_for_topic(question: str, topic: str, policy_uin: str) -> list[dict
                 "policy_uin": policy_uin,
             }
         )
-    # coverage and sub_limit both read covered-benefit clauses; check_coverage
-    # already spans the coverage and sub_limit topics.
+    # coverage, sub_limit and copay_deductible all read payment-condition
+    # clauses, and check_coverage already spans those three topics.
     return check_coverage.invoke({"treatment": question, "policy_uin": policy_uin})
-
-
-_policy_store: PolicyDataStore | None = None
 
 
 def _sql_waiting_period_fact(policy_uin: str, question: str) -> str | None:
@@ -265,11 +255,7 @@ def _sql_waiting_period_fact(policy_uin: str, question: str) -> str | None:
     agent closes this gap with waiting_period_tracker; without it the
     evaluation is scoring a fact the retrieval path was never given.
     """
-    global _policy_store
-    if _policy_store is None:
-        _policy_store = PolicyDataStore(settings.crm_db_path)
-
-    for row in _policy_store.get_waiting_periods(policy_uin):
+    for row in get_policy_store().get_waiting_periods(policy_uin):
         condition = (row.get("condition") or "").lower()
         if condition and condition in question.lower():
             return (
@@ -284,33 +270,21 @@ def answer_question(
     question: str,
     policy_uin: str,
     generator,
-    policy_uin_2: str | None = None,
     topic: str = "",
 ) -> tuple[str, list[str]]:
     """Retrieve policy context and generate an answer.
 
-    Retrieval is routed by topic so the evaluation exercises the same tools the
-    agent uses. Comparison questions across two policies query both UIDs.
+    Retrieval is routed by topic so the evaluation exercises the same tools
+    the agent uses, rather than a generic search the product never runs.
     """
-    if topic == "comparison" and policy_uin_2:
-        # A query naming both policies ranks cover pages above real clauses, so
-        # each policy is searched separately and the hits merged.
-        hits = _retrieve_for_topic(question, topic, policy_uin)
-        hits2 = _retrieve_for_topic(question, topic, policy_uin_2)
-        print(f"    Policy 1 ({policy_uin}): {len(hits)} chunks")
-        print(f"    Policy 2 ({policy_uin_2}): {len(hits2)} chunks")
-        hits = hits + hits2
-    else:
-        hits = _retrieve_for_topic(question, topic, policy_uin)
-
+    hits = _retrieve_for_topic(question, topic, policy_uin)
     contexts = [hit["text"] for hit in hits]
 
     if topic == "waiting_period":
-        for uin in filter(None, (policy_uin, policy_uin_2)):
-            fact = _sql_waiting_period_fact(uin, question)
-            if fact:
-                # Put it first: it is the exact fact the question asks for.
-                contexts.insert(0, fact)
+        fact = _sql_waiting_period_fact(policy_uin, question)
+        if fact:
+            # Put it first: it is the exact fact the question asks for.
+            contexts.insert(0, fact)
 
     truncated = _truncate_contexts(contexts)
     context_text = "\n\n".join(truncated)
@@ -332,7 +306,6 @@ def build_ragas_samples(entries: list[dict]) -> list:
             time.sleep(ANSWER_DELAY_SECONDS)
         answer, contexts = answer_question(
             entry["question"], entry["context_uin"], generator,
-            policy_uin_2=entry.get("context_uin_2"),
             topic=entry.get("topic", ""),
         )
         samples.append(
@@ -348,16 +321,10 @@ def build_ragas_samples(entries: list[dict]) -> list:
 
 
 def _make_judge():
-    """Build the judge LLM wrapper — Groq openai/gpt-oss-120b."""
+    """Build the judge LLM wrapper, on its own Cerebras key."""
     from ragas.llms import LangchainLLMWrapper
-    from langchain_groq import ChatGroq
 
-    return LangchainLLMWrapper(ChatGroq(
-        api_key=settings.groq_api_key,
-        model=EVAL_MODEL,
-        temperature=0,
-        max_retries=2,
-    ))
+    return LangchainLLMWrapper(_cerebras_llm("CEREBRAS_JUDGE_API_KEY"))
 
 
 def _score_one(sample, judge_llm, judge_embeddings, metrics, run_config) -> dict:
@@ -382,7 +349,10 @@ def run_metrics(samples: list) -> dict[str, float]:
     from ragas.run_config import RunConfig
 
     judge_llm = _make_judge()
-    judge_embeddings = LangchainEmbeddingsWrapper(_BGELangchainEmbeddings())
+    # get_embedder() already returns a LangChain Embeddings, which is what
+    # RAGAS wants -- the project used to keep an adapter class here purely
+    # to convert its own wrapper back into this interface.
+    judge_embeddings = LangchainEmbeddingsWrapper(get_embedder())
 
     # max_workers=1: serialize calls to avoid hammering Groq's free-tier rate
     # limit. timeout=180: 429 retries wait up to 60s; 180s gives that room.
@@ -429,9 +399,9 @@ def save_results(scores: dict[str, float], dataset_size: int) -> None:
     payload = {
         "timestamp": datetime.now(UTC).isoformat(),
         "dataset_size": dataset_size,
-        "answer_provider": "groq",
+        "answer_provider": "cerebras",
         "answer_model": EVAL_MODEL,
-        "judge_provider": "groq",
+        "judge_provider": "cerebras",
         "judge_model": EVAL_MODEL,
         "note": (
             "Answer and judge are the same model -- scores can run higher "
@@ -463,8 +433,8 @@ def main() -> None:
 
     configure_logging()
 
-    print(f"Answer model : {EVAL_MODEL} (groq)")
-    print(f"Judge model  : {EVAL_MODEL} (groq)")
+    print(f"Answer model : {EVAL_MODEL} (cerebras)")
+    print(f"Judge model  : {EVAL_MODEL} (cerebras, separate key)")
     print("Prompt       : eval (strict - context-only)")
     print(f"Context cap  : {MAX_CONTEXT_CHARS:,} chars per question (~3,000 tokens)")
     print(f"Eval delay   : {EVAL_DELAY_SECONDS}s between questions")

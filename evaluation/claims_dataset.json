@@ -1,0 +1,339 @@
+[
+  {
+    "case_id": "CLAIM-01-covered-with-sublimit-and-copay",
+    "scenario": "Covered claim with both a sub-limit and a co-pay",
+    "customer_id": "CUST001",
+    "policy_id": "POL001",
+    "claim": {
+      "claim_type": "hospitalization",
+      "treatment": "Cataract Surgery",
+      "diagnosis": "Senile Cataract Right Eye",
+      "claim_amount": 60000,
+      "treatment_date": "2026-08-19",
+      "hospital": "Lilavati Hospital, Mumbai",
+      "notes": "Day-care procedure, single eye."
+    },
+    "expected": {
+      "status": "eligible",
+      "payable_amount": 38000,
+      "reason": "Cataract is capped at Rs 40,000 by the sub-limit on record, then the policy's 5% co-pay is deducted, leaving Rs 38,000 against a remaining sum insured of Rs 455,000.",
+      "required_evidence": [
+        "The Rs 40,000 cataract sub-limit under UIN SHAHLIP22027V032122",
+        "The 5% co-payment that applies to all claims on this plan"
+      ]
+    }
+  },
+  {
+    "case_id": "CLAIM-02-sublimit-caps-the-payout",
+    "scenario": "Covered claim where the sub-limit alone decides the figure",
+    "customer_id": "CUST003",
+    "policy_id": "POL003",
+    "claim": {
+      "claim_type": "hospitalization",
+      "treatment": "Cataract Surgery",
+      "diagnosis": "Bilateral senile cataract",
+      "claim_amount": 50000,
+      "treatment_date": "2026-08-19",
+      "hospital": "Aravind Eye Hospital, Coimbatore",
+      "notes": "Senior citizen plan. No co-pay row is curated in SQL, but the wording states 30% on all claims -- the case for the wording fallback."
+    },
+    "expected": {
+      "status": "eligible",
+      "payable_amount": 10500,
+      "reason": "The Red Carpet plan caps cataract at Rs 15,000, and its wording applies a 30% co-payment to all claims, leaving Rs 10,500. The co-pay is read out of the policy text because no co-pay row is curated for this plan.",
+      "required_evidence": [
+        "The Rs 15,000 cataract sub-limit under UIN SHAHLIP25027V072425",
+        "The 30% co-payment on all claims stated in the Red Carpet wording"
+      ]
+    }
+  },
+  {
+    "case_id": "CLAIM-03-remaining-sum-insured-limits-payout",
+    "scenario": "Multiple previous claims have nearly exhausted the sum insured",
+    "customer_id": "CUST003",
+    "policy_id": "POL003",
+    "claim": {
+      "claim_type": "hospitalization",
+      "treatment": "Angioplasty",
+      "diagnosis": "Triple vessel coronary artery disease",
+      "claim_amount": 250000,
+      "treatment_date": "2026-08-19",
+      "hospital": "Kovai Medical Centre",
+      "notes": "Three approved claims already this policy year."
+    },
+    "expected": {
+      "status": "eligible",
+      "payable_amount": 80000,
+      "reason": "Rs 9,20,000 of the Rs 10,00,000 sum insured is already used, so the payout is capped at the Rs 80,000 that remains.",
+      "required_evidence": [
+        "The remaining sum insured after CLM003, CLM004 and CLM005"
+      ]
+    }
+  },
+  {
+    "case_id": "CLAIM-04-deductible-reduces-payout",
+    "scenario": "Top-up plan pays only the excess above its deductible",
+    "customer_id": "CUST004",
+    "policy_id": "POL004",
+    "claim": {
+      "claim_type": "hospitalization",
+      "treatment": "Angioplasty",
+      "diagnosis": "Acute myocardial infarction",
+      "claim_amount": 500000,
+      "treatment_date": "2026-08-19",
+      "hospital": "Amrita Institute, Kochi",
+      "notes": "Top-up plan with a Rs 2,00,000 deductible on record."
+    },
+    "expected": {
+      "status": "eligible",
+      "payable_amount": 300000,
+      "reason": "A top-up pays only above its deductible: Rs 5,00,000 less the Rs 2,00,000 deductible leaves Rs 3,00,000, which is inside the remaining sum insured.",
+      "required_evidence": [
+        "The Rs 2,00,000 deductible on record for UIN IRDA/NL-HLT/NIA/P-H/V.I/35/14-15"
+      ]
+    }
+  },
+  {
+    "case_id": "CLAIM-05-deductible-consumes-the-whole-bill",
+    "scenario": "Bill sits exactly at the deductible, so nothing is payable",
+    "customer_id": "CUST004",
+    "policy_id": "POL004",
+    "claim": {
+      "claim_type": "hospitalization",
+      "treatment": "Angioplasty",
+      "diagnosis": "Single vessel disease",
+      "claim_amount": 200000,
+      "treatment_date": "2026-08-19",
+      "hospital": "Amrita Institute, Kochi",
+      "notes": "Tests that a payable of zero is not confused with a rejection."
+    },
+    "expected": {
+      "status": "eligible",
+      "payable_amount": 0,
+      "reason": "The claim is eligible, but the Rs 2,00,000 deductible consumes the entire Rs 2,00,000 bill, so nothing is payable. This is a deduction, not a rejection.",
+      "required_evidence": [
+        "The Rs 2,00,000 deductible on record for UIN IRDA/NL-HLT/NIA/P-H/V.I/35/14-15"
+      ]
+    }
+  },
+  {
+    "case_id": "CLAIM-06-maternity-waiting-period-not-served",
+    "scenario": "Waiting-period failure",
+    "customer_id": "CUST002",
+    "policy_id": "POL002",
+    "claim": {
+      "claim_type": "maternity",
+      "treatment": "Maternity",
+      "diagnosis": "Normal delivery",
+      "claim_amount": 60000,
+      "treatment_date": "2026-08-19",
+      "hospital": "Fortis La Femme, Gurgaon",
+      "notes": "Policy incepted 2026-05-16."
+    },
+    "expected": {
+      "status": "ineligible",
+      "payable_amount": 0,
+      "reason": "Maternity carries a 24-month waiting period on this plan. The policy started 2026-05-16, so cover begins 2028-05-16 and this treatment falls inside the waiting period.",
+      "required_evidence": [
+        "The 24-month maternity waiting period under UIN IRDAII/HLT/OIC/P-H/V.II/450/15-16"
+      ]
+    }
+  },
+  {
+    "case_id": "CLAIM-07-pre-existing-disease-waiting-period",
+    "scenario": "Pre-existing disease waiting period",
+    "customer_id": "CUST001",
+    "policy_id": "POL001",
+    "claim": {
+      "claim_type": "hospitalization",
+      "treatment": "Pre-existing disease",
+      "diagnosis": "Type 2 diabetes mellitus declared at inception",
+      "claim_amount": 90000,
+      "treatment_date": "2026-08-19",
+      "hospital": "Lilavati Hospital, Mumbai",
+      "notes": "Policy incepted 2025-09-01; PED waiting period is 48 months."
+    },
+    "expected": {
+      "status": "ineligible",
+      "payable_amount": 0,
+      "reason": "Pre-existing diseases carry a 48-month waiting period on this plan. The policy started 2025-09-01, so cover for them begins 2029-09-01.",
+      "required_evidence": [
+        "The 48-month pre-existing disease waiting period under UIN SHAHLIP22027V032122"
+      ]
+    }
+  },
+  {
+    "case_id": "CLAIM-08-cosmetic-surgery-excluded",
+    "scenario": "Exclusion",
+    "customer_id": "CUST004",
+    "policy_id": "POL004",
+    "claim": {
+      "claim_type": "cosmetic_surgery",
+      "treatment": "Cosmetic Surgery",
+      "diagnosis": "Rhinoplasty for appearance",
+      "claim_amount": 80000,
+      "treatment_date": "2026-07-22",
+      "hospital": "VPS Lakeshore, Kochi",
+      "notes": "Not necessitated by accident or illness."
+    },
+    "expected": {
+      "status": "ineligible",
+      "payable_amount": 0,
+      "reason": "Cosmetic and aesthetic treatment is named in this policy's exclusion list, so no amount is payable regardless of the other checks.",
+      "required_evidence": [
+        "The cosmetic/aesthetic treatment exclusion under UIN IRDA/NL-HLT/NIA/P-H/V.I/35/14-15"
+      ]
+    }
+  },
+  {
+    "case_id": "CLAIM-09-policy-lapsed-before-treatment",
+    "scenario": "Expired / inactive policy",
+    "customer_id": "CUST005",
+    "policy_id": "POL005",
+    "claim": {
+      "claim_type": "hospitalization",
+      "treatment": "Appendectomy",
+      "diagnosis": "Acute appendicitis",
+      "claim_amount": 70000,
+      "treatment_date": "2026-08-19",
+      "hospital": "Apollo Hospitals, Hyderabad",
+      "notes": "Policy expired 2025-05-31 and was not renewed."
+    },
+    "expected": {
+      "status": "ineligible",
+      "payable_amount": 0,
+      "reason": "The policy status is 'expired', so it cannot pay. No later check needs to run.",
+      "required_evidence": []
+    }
+  },
+  {
+    "case_id": "CLAIM-10-treatment-outside-policy-period",
+    "scenario": "Treatment date falls outside the policy term",
+    "customer_id": "CUST001",
+    "policy_id": "POL001",
+    "claim": {
+      "claim_type": "hospitalization",
+      "treatment": "Cataract Surgery",
+      "diagnosis": "Senile cataract",
+      "claim_amount": 60000,
+      "treatment_date": "2025-01-15",
+      "hospital": "Lilavati Hospital, Mumbai",
+      "notes": "Treatment predates the 2025-09-01 inception."
+    },
+    "expected": {
+      "status": "ineligible",
+      "payable_amount": 0,
+      "reason": "The treatment date 2025-01-15 is before the policy start date 2025-09-01, so this policy was not on risk.",
+      "required_evidence": []
+    }
+  },
+  {
+    "case_id": "CLAIM-11-policy-not-held-by-this-customer",
+    "scenario": "Customer / policy mismatch",
+    "customer_id": "CUST001",
+    "policy_id": "POL003",
+    "claim": {
+      "claim_type": "hospitalization",
+      "treatment": "Cataract Surgery",
+      "diagnosis": "Senile cataract",
+      "claim_amount": 50000,
+      "treatment_date": "2026-08-19",
+      "hospital": "Aravind Eye Hospital, Coimbatore",
+      "notes": "POL003 belongs to CUST003, not CUST001."
+    },
+    "expected": {
+      "status": "ineligible",
+      "payable_amount": 0,
+      "reason": "POL003 is not held by CUST001, so no assessment against it is possible. Nothing about the treatment is examined.",
+      "required_evidence": []
+    }
+  },
+  {
+    "case_id": "CLAIM-12-claim-names-no-procedure",
+    "scenario": "Missing claim information",
+    "customer_id": "CUST001",
+    "policy_id": "POL001",
+    "claim": {
+      "claim_type": "hospitalization",
+      "treatment": "hospitalisation",
+      "diagnosis": "",
+      "claim_amount": 60000,
+      "treatment_date": "2026-08-19",
+      "hospital": "Lilavati Hospital, Mumbai",
+      "notes": "The form names no specific procedure or diagnosis."
+    },
+    "expected": {
+      "status": "needs_more_info",
+      "payable_amount": null,
+      "reason": "The claim names no specific procedure or condition, and this policy states its conditions per procedure, so there is nothing to assess. The gap is in the claim, not the policy.",
+      "required_evidence": []
+    }
+  },
+  {
+    "case_id": "CLAIM-13-policy-wording-not-indexed",
+    "scenario": "Missing policy evidence - the wording was never loaded",
+    "customer_id": "CUST005",
+    "policy_id": "POL006",
+    "claim": {
+      "claim_type": "hospitalization",
+      "treatment": "Appendectomy",
+      "diagnosis": "Acute appendicitis",
+      "claim_amount": 70000,
+      "treatment_date": "2026-08-19",
+      "hospital": "Apollo Hospitals, Hyderabad",
+      "notes": "The policy is on file but its wording PDF was never indexed."
+    },
+    "expected": {
+      "status": "needs_more_info",
+      "payable_amount": null,
+      "reason": "Nothing can be retrieved for this policy's UIN, so no clause granting cover, capping it, or excluding it can be read. The claim must not be assessed on the grounds that no exclusion was found.",
+      "required_evidence": []
+    }
+  },
+  {
+    "case_id": "CLAIM-14-modern-treatment-covered",
+    "scenario": "Coverage confirmed from a modern-treatment table",
+    "customer_id": "CUST001",
+    "policy_id": "POL001",
+    "claim": {
+      "claim_type": "hospitalization",
+      "treatment": "Stereotactic Radiosurgery",
+      "diagnosis": "Trigeminal neuralgia",
+      "claim_amount": 120000,
+      "treatment_date": "2026-08-19",
+      "hospital": "Tata Memorial Centre, Mumbai",
+      "notes": "Listed under the modern treatment methods this plan covers. Regression case for table-derived chunks being unreachable by the retrieval filter."
+    },
+    "expected": {
+      "status": "eligible",
+      "payable_amount": 114000,
+      "reason": "Stereotactic radiosurgery is named among the modern treatment methods this plan covers. No sub-limit applies to it, so the 5% co-pay is the only deduction: Rs 1,20,000 less Rs 6,000 leaves Rs 1,14,000.",
+      "required_evidence": [
+        "The modern treatment methods clause under UIN SHAHLIP22027V032122"
+      ]
+    }
+  },
+  {
+    "case_id": "CLAIM-15-covered-with-copay-only",
+    "scenario": "Covered claim where the co-pay is the only deduction",
+    "customer_id": "CUST001",
+    "policy_id": "POL001",
+    "claim": {
+      "claim_type": "hospitalization",
+      "treatment": "Appendectomy",
+      "diagnosis": "Acute appendicitis",
+      "claim_amount": 70000,
+      "treatment_date": "2026-08-19",
+      "hospital": "Lilavati Hospital, Mumbai",
+      "notes": "A named surgical procedure with no sub-limit of its own."
+    },
+    "expected": {
+      "status": "eligible",
+      "payable_amount": 66500,
+      "reason": "Appendectomy is covered, no sub-limit applies to it, and the plan's 5% co-pay is the only deduction: Rs 70,000 less Rs 3,500 leaves Rs 66,500.",
+      "required_evidence": [
+        "A clause showing appendectomy is covered under UIN SHAHLIP22027V032122"
+      ]
+    }
+  }
+]

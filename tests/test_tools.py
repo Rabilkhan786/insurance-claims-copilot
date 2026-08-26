@@ -4,8 +4,6 @@ Each test that touches a database points the relevant module's singleton
 at an isolated tmp_path store via monkeypatch, so tests never depend on
 (or pollute) the real seeded data.
 """
-from datetime import datetime, timedelta
-
 from langchain.tools import ToolRuntime
 
 import src.tools.calc_tools as calc_tools
@@ -35,9 +33,12 @@ def _invoke_scoped(tool, customer_id: str, **kwargs):
 # --- CRM tools --------------------------------------------------------------
 def test_get_customer_returns_an_error_for_unknown_customer_id(tmp_path, monkeypatch):
     """The tool returns a structured error, not None — the model reads the
-    message and tells the customer, instead of seeing an empty result."""
+    message and reports it, instead of seeing an empty result."""
     store = CRMStore(tmp_path / "crm.db")
-    monkeypatch.setattr(crm_tools, "_store", store)
+    # Patched at the accessor, not as a module global: the store is reached
+    # through an lru_cache'd function, so swapping a global would leave the
+    # cached instance in place.
+    monkeypatch.setattr(crm_tools, "get_crm_store", lambda: store)
 
     assert _invoke_scoped(crm_tools.get_customer, "NOPE") == {
         "error": "Customer not found."
@@ -47,7 +48,7 @@ def test_get_customer_returns_an_error_for_unknown_customer_id(tmp_path, monkeyp
 def test_get_policies_returns_empty_list_for_customer_with_no_policies(tmp_path, monkeypatch):
     store = CRMStore(tmp_path / "crm.db")
     store.add_customer("A1", "Alice")
-    monkeypatch.setattr(crm_tools, "_store", store)
+    monkeypatch.setattr(crm_tools, "get_crm_store", lambda: store)
 
     assert _invoke_scoped(crm_tools.get_policies, "A1") == []
 
@@ -115,7 +116,9 @@ def test_sum_insured_balance_returns_correct_remaining_amount(tmp_path, monkeypa
         "CLM-A3", "A1", "POL-A1", "hospitalization", 999999,
         "2026-02-01", status="rejected",
     )
-    monkeypatch.setattr(calc_tools, "_crm_store", store)
+    # The store is reached through a cached accessor, so the accessor is what
+    # gets swapped -- setting a module global would leave the cache in place.
+    monkeypatch.setattr(calc_tools, "get_crm_store", lambda: store)
 
     result = calc_tools.compute_sum_insured_balance("POL-A1", "A1")
 

@@ -13,6 +13,7 @@ import logging
 import os
 import sqlite3
 from dataclasses import dataclass
+from functools import lru_cache
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import (
@@ -30,12 +31,11 @@ logger = logging.getLogger(__name__)
 # Caps one run so a confused loop cannot burn the Groq daily quota. "end"
 # means it returns what it has instead of raising.
 #
-# Raised from 5 to 10: a customer chat answered one question in five calls,
-# but a claim recommendation gathers evidence with several tools and then
-# writes a four-part answer. At five the agent ran out mid-run and the
-# employee saw "Model call limits exceeded: run limit (5/5)" where the
-# reasoning should have been -- intermittently, since it sat right on the
-# boundary.
+# Raised from 5 to 10: a single question answered in five calls, but a claim
+# recommendation gathers evidence with several tools and then writes a
+# four-part answer. At five the agent ran out mid-run and the employee saw
+# "Model call limits exceeded: run limit (5/5)" where the reasoning should
+# have been -- intermittently, since it sat right on the boundary.
 MAX_MODEL_CALLS_PER_RUN = 10
 
 SYSTEM_PROMPT = """You are a claims analysis copilot for an insurance claims employee.
@@ -63,8 +63,14 @@ Rules:
 - Show your work. Unlike a customer-facing answer, an employee needs to see
   how the figure was reached: name the checks that ran, say which one was
   decisive, and give the intermediate numbers. It is correct and useful to
-  surface fields like eligible, rejection_reason, waiting-period dates and
-  remaining sum insured. State them as findings, not as raw field dumps.
+  surface the engine's own fields -- status, reason, the per-fact status
+  (found / not_applicable / unknown), waiting-period dates and remaining sum
+  insured. State them as findings, not as raw field dumps.
+- A fact marked "unknown" was never established. Do not describe it as zero,
+  as absent, or as not applying -- say it could not be established, and put
+  it under Missing information. "not_applicable" is different and does mean
+  the policy states no such condition; that one is safe to report as a
+  finding.
 - Your facts come from two kinds of source, and each has its own rule.
   1. The customer's own records -- profile, policies, claims, and any amount
      calculated from them. These are authoritative. State them directly with
@@ -112,11 +118,6 @@ Rules:
   "as specified below" without a number -- that is expected. Do NOT search
   again looking for the number; the tracker supplies it. Never run the same
   search twice with reworded queries.
-- When comparing two or more policies, structure the answer as:
-    * Name and UIN of each policy on a separate line
-    * The specific value for each policy with exact numbers
-    * A brief summary sentence stating which is better and why
-    * Source citations for each policy separately
 - If a tool returns an error, say plainly what went wrong and recommend
   "Needs More Info" -- never invent an answer to cover for it."""
 
@@ -138,64 +139,56 @@ def _configure_langsmith_tracing() -> None:
         os.environ.setdefault(f"{prefix}_API_KEY", settings.langchain_api_key)
 
 
-_checkpointer = None
-
-
+@lru_cache(maxsize=1)
 def get_checkpointer() -> SqliteSaver:
-    """Return the shared thread store, so memory survives a Railway restart.
+    """Return the one thread store, so memory survives a restart.
 
-    The outer workflow and this agent must share one instance: the workflow
-    owns the thread, the agent runs inside it as a subgraph.
+    Only the outer workflow passes this to compile(). The agent below is
+    added to that workflow as a subgraph node, and LangGraph gives a subgraph
+    its parent's checkpointer automatically -- handing the agent its own as
+    well meant two objects writing the same threads, which is the kind of
+    duplicate persistence that makes a resumed interrupt hard to reason about.
+
     check_same_thread=False because FastAPI serves requests from a threadpool.
     """
-    global _checkpointer
-    if _checkpointer is None:
-        checkpoint_path = settings.root_dir / "data" / "checkpoints.db"
-        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-        connection = sqlite3.connect(str(checkpoint_path), check_same_thread=False)
-        _checkpointer = SqliteSaver(connection)
-    return _checkpointer
+    checkpoint_path = settings.root_dir / "data" / "checkpoints.db"
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(str(checkpoint_path), check_same_thread=False)
+    return SqliteSaver(connection)
 
 
-_agent = None
-
-
+@lru_cache(maxsize=1)
 def get_agent():
     """Return the compiled agent, building it once per process."""
-    global _agent
-    if _agent is None:
-        if not settings.groq_api_key:
-            raise RuntimeError("GROQ_API_KEY is required for the agent")
-        _configure_langsmith_tracing()
+    if not settings.groq_api_key:
+        raise RuntimeError("GROQ_API_KEY is required for the agent")
+    _configure_langsmith_tracing()
 
-        _agent = create_agent(
-            model=ChatGroq(
-                api_key=settings.groq_api_key,
-                model=settings.llm_model,
-                temperature=settings.llm_temperature,
-                # streaming=True makes the model emit token callbacks even
-                # when create_agent calls invoke(), which is what lets
-                # stream_mode="messages" paint the answer word by word.
-                streaming=True,
+    agent = create_agent(
+        model=ChatGroq(
+            api_key=settings.groq_api_key,
+            model=settings.llm_model,
+            temperature=settings.llm_temperature,
+            # streaming=True makes the model emit token callbacks even when
+            # create_agent calls invoke(), which is what lets
+            # stream_mode="messages" paint the answer word by word.
+            streaming=True,
+        ),
+        tools=ALL_TOOLS,
+        system_prompt=SYSTEM_PROMPT,
+        context_schema=Context,
+        # No checkpointer here on purpose -- see get_checkpointer().
+        middleware=[
+            # Groq validates tool names server-side and raises an APIError for
+            # the whole request if the model invents one (it has guessed
+            # "get_sum_insured_balance"). One retry recovers the turn instead
+            # of losing the employee's question.
+            ModelRetryMiddleware(max_retries=2, on_failure="continue"),
+            ModelCallLimitMiddleware(
+                run_limit=MAX_MODEL_CALLS_PER_RUN,
+                exit_behavior="end",
             ),
-            tools=ALL_TOOLS,
-            system_prompt=SYSTEM_PROMPT,
-            context_schema=Context,
-            checkpointer=get_checkpointer(),
-            middleware=[
-                # Groq validates tool names server-side and raises an APIError
-                # for the whole request if the model invents one (it has
-                # guessed "get_sum_insured_balance"). One retry recovers the
-                # turn instead of losing the customer's question.
-                ModelRetryMiddleware(
-                    max_retries=2,
-                    on_failure="continue",
-                ),
-                ModelCallLimitMiddleware(
-                    run_limit=MAX_MODEL_CALLS_PER_RUN,
-                    exit_behavior="end",
-                ),
-            ],
-        )
-        logger.info("agent_built tools=%s model=%s", len(ALL_TOOLS), settings.llm_model)
-    return _agent
+        ],
+    )
+    logger.info("agent_built tools=%s model=%s", len(ALL_TOOLS), settings.llm_model)
+    return agent

@@ -14,6 +14,7 @@ from starlette.concurrency import iterate_in_threadpool, run_in_threadpool
 
 from config import settings
 from src.agent import (
+    ClaimRecommendation,
     reset_session,
     run_agent,
     run_claim_review,
@@ -60,10 +61,15 @@ class ClaimRequest(BaseModel):
 
 
 class ClaimResponse(BaseModel):
+    """A recommendation awaiting review -- never a settled outcome.
+
+    `recommendation` is a ClaimRecommendation: its status and payable_amount
+    come from the deterministic engine, not from the model.
+    """
+
     session_id: str
     awaiting_review: bool
-    recommendation: str | None = None
-    eligibility: dict | None = None
+    recommendation: ClaimRecommendation | None = None
     error: str | None = None
 
 
