@@ -1,7 +1,7 @@
 """Tests for the section-aware ingestion pipeline."""
 import pymupdf
 
-from src.ingestion.chunker import chunk_page, detect_topic
+from src.ingestion.chunker import chunk_page, detect_topics
 from src.ingestion.page_parser import parse_page
 from src.ingestion.table_classifier import classify_table
 
@@ -159,7 +159,11 @@ def test_chunker_carries_uin_and_page_into_metadata():
 
 
 def test_detect_topic_falls_back_to_general():
-    assert detect_topic("The schedule is attached herewith.") == "general"
+    # detect_topics()[0] is what chunk_page() actually calls to fill the
+    # single-string "topic" metadata field -- a wrapper for just the first
+    # element used to sit between them and be tested here instead, which
+    # meant this test could pass while the real call site had drifted.
+    assert detect_topics("The schedule is attached herewith.")[0] == "general"
 
 
 def test_detect_topic_does_not_tag_shall_not_apply_as_exclusion():
@@ -169,13 +173,13 @@ def test_detect_topic_does_not_tag_shall_not_apply_as_exclusion():
     # as exclusions.
     text = "The time limit shall not apply in respect of Day Care Treatment."
 
-    assert detect_topic(text) == "general"
+    assert detect_topics(text)[0] == "general"
 
 
 def test_detect_topic_tags_shall_not_be_liable_as_exclusion():
     text = "The Company shall not be liable for dental treatment of any kind."
 
-    assert detect_topic(text) == "exclusion"
+    assert detect_topics(text)[0] == "exclusion"
 
 
 # --- page_parser --------------------------------------------------------

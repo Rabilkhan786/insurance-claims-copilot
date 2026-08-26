@@ -77,8 +77,3 @@ def set(
     key = _make_key(query, topic, uin, extra)
     _entries[key] = (time.time() + settings.rag_cache_ttl_seconds, hits)
     logger.info("rag_cache_store query=%r entries=%s", query[:60], len(_entries))
-
-
-def clear() -> None:
-    """Empty the cache. Used by tests."""
-    _entries.clear()
