@@ -3,23 +3,10 @@
 Usage:  uv run python evaluation/run_ragas.py
         uv run python evaluation/run_ragas.py --smoke   (1 per topic)
 
-WHAT THIS MEASURES, AND WHAT IT DOES NOT: this scores the retrieval half of
-the copilot -- can it find the clause that answers a question about a policy,
-and does its answer stay faithful to what was retrieved. It says nothing
-about whether a claim was assessed correctly. Claim decisions and payable
-amounts are deterministic, so they are scored by exact comparison in
-tests/test_claims_evaluation.py against evaluation/claims_dataset.json. An
-LLM judge has no business ruling on whether Rs 38,000 is the right figure.
-
-The dataset is 10 questions, 2 per clause type. One model does both jobs --
-Groq's gpt-oss-120b, the same model and the same GROQ_API_KEY the live app
-already uses, so this evaluates the model actually shipped rather than a
-stand-in. NOTE: judging its own answers means self-grading bias -- scores
-can read higher than a different model's judgment would give. Treat these
-as directional, not absolute.
-
-Each question is scored individually so rate-limit delays and retries are
-per-question rather than per-batch. Scores are saved to
+Scores retrieval quality (not claim correctness -- see
+tests/test_claims_evaluation.py for that) with Groq's gpt-oss-120b acting as
+both answerer and judge. Full explanation, caveats and self-grading-bias
+tradeoff: evaluation/README.md. Results are saved to
 evaluation/baseline_results.json.
 """
 from __future__ import annotations
@@ -313,7 +300,15 @@ def _make_judge():
 
 
 def _score_one(sample, judge_llm, judge_embeddings, metrics, run_config) -> dict:
-    """Score a single sample, returning per-metric floats."""
+    """Score a single sample, returning per-metric floats.
+
+    No retry wrapper here on purpose -- run_config already carries
+    max_retries/max_wait, and RAGAS retries internally on every judge call.
+    Wrapping this in a second retry loop would retry the retries: a single
+    stuck question could sit through max_retries-squared attempts before
+    finally failing, which is what made an earlier run look hung instead of
+    finishing or failing cleanly.
+    """
     from ragas import EvaluationDataset, evaluate
 
     result = evaluate(
@@ -328,7 +323,7 @@ def _score_one(sample, judge_llm, judge_embeddings, metrics, run_config) -> dict
 
 
 def run_metrics(samples: list) -> dict[str, float]:
-    """Score every sample individually, with delay and retry between questions."""
+    """Score every sample individually, with a pacing delay between questions."""
     from ragas.embeddings import LangchainEmbeddingsWrapper
     from ragas.metrics import answer_relevancy, context_precision, context_recall, faithfulness
     from ragas.run_config import RunConfig
@@ -339,8 +334,15 @@ def run_metrics(samples: list) -> dict[str, float]:
     judge_embeddings = LangchainEmbeddingsWrapper(get_embedder())
 
     # max_workers=1: serialize calls to avoid hammering Groq's rate limit.
-    # timeout=180: 429 retries wait up to 60s; 180s gives that room.
-    run_config = RunConfig(max_workers=1, timeout=180)
+    # timeout=180: retries wait up to RETRY_WAIT_SECONDS; 180s gives that room.
+    # max_retries/max_wait reuse the same constants as the answer-generation
+    # retry below, so there is one rate-limit policy, not two.
+    run_config = RunConfig(
+        max_workers=1,
+        timeout=180,
+        max_retries=MAX_RETRIES,
+        max_wait=RETRY_WAIT_SECONDS,
+    )
     metrics = [faithfulness, answer_relevancy, context_precision, context_recall]
 
     accumulated: dict[str, list[float]] = {k: [] for k in METRIC_LABELS}
@@ -352,9 +354,7 @@ def run_metrics(samples: list) -> dict[str, float]:
             time.sleep(EVAL_DELAY_SECONDS)
 
         try:
-            scores = _retry_on_rate_limit(_score_one)(
-                sample, judge_llm, judge_embeddings, metrics, run_config
-            )
+            scores = _score_one(sample, judge_llm, judge_embeddings, metrics, run_config)
             # Per-question scores make a single bad question visible instead
             # of hiding it inside the average.
             detail = "  ".join(

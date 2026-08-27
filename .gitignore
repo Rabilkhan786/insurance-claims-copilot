@@ -35,3 +35,8 @@ BUILD_PLAN.md
 
 # Notebooks (optional for production)
 notebooks/
+
+.claude/
+
+CLAUDE.md
+BUILD.md

@@ -1,4 +1,8 @@
-"""FastAPI backend entry point for the Insurance Hybrid RAG application."""
+"""FastAPI backend for the Claims Copilot.
+
+Run with:  uv run uvicorn app:app --port 8000
+      or:  uv run python app.py
+"""
 from __future__ import annotations
 
 import logging

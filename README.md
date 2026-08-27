@@ -151,6 +151,13 @@ vectors it produces rather than duplicating them. It cannot know about chunks
 produced from a PDF you have since deleted — use `--reset` for that, and after
 any change to how chunks are tagged, because tags are baked in at index time.
 
+## Tests
+
+```bash
+uv run pytest                                     # everything (~180 tests)
+uv run pytest tests/test_claims_evaluation.py -v  # just the claim-correctness benchmark
+```
+
 ## Evaluation
 
 Two separate things are measured, because they fail in different ways.
@@ -160,21 +167,15 @@ Two separate things are measured, because they fail in different ways.
 `evaluation/claims_dataset.json` holds 15 labelled claims covering sub-limits,
 co-pays, deductibles, waiting periods, exclusions, an exhausted sum insured, a
 lapsed policy, a customer/policy mismatch, and both kinds of
-`needs_more_info`. Each case declares the expected status and payable amount.
-
-```bash
-uv run pytest tests/test_claims_evaluation.py -v
-```
-
-A payable amount is either right or wrong, so it is checked with `==`. No LLM
-judge is involved in scoring money or dates.
+`needs_more_info`. Each case declares the expected status and payable amount,
+checked with `==` — a payable amount is either right or wrong, no LLM judge
+needed.
 
 ### Retrieval quality — RAGAS
 
 `evaluation/rag_dataset.json` holds 10 policy-evidence questions, two each for
 waiting periods, coverage, exclusions, sub-limits, and co-pay/deductible
-wording. Every question was written from the actual PDF text with its UIN and
-page recorded.
+wording.
 
 ```bash
 uv sync --extra evaluation
@@ -182,16 +183,21 @@ uv run python evaluation/run_ragas.py           # full run
 uv run python evaluation/run_ragas.py --smoke   # 1 per topic
 ```
 
-One model does both jobs -- Groq's `gpt-oss-120b`, the same model and the
-same `GROQ_API_KEY` the live app already uses, so this measures the model
-actually shipped rather than a separate one brought in just to grade. Scores
-are written to `evaluation/baseline_results.json`. A full run takes roughly
-20 minutes: it spaces calls out to stay inside Groq's rate limit.
+Groq's `gpt-oss-120b` — the same model the live app uses — both answers the
+questions and grades the answers. Scores land in
+`evaluation/baseline_results.json`:
 
-RAGAS measures faithfulness, answer relevancy, context precision and context
-recall — retrieval, not decisions. Read the scores next to the caveats in
-[evaluation/README.md](evaluation/README.md), especially that judging its own
-answers means self-grading bias can inflate them.
+| Metric | Question it answers | Latest score |
+|---|---|---|
+| Faithfulness | Is every statement in the answer supported by the retrieved text? | 0.87 |
+| Answer relevancy | Does the answer address the question actually asked? | 0.71 |
+| Context precision | Of the chunks retrieved, how many were relevant? | 0.79 |
+| Context recall | Did retrieval find everything the reference answer needs? | 0.70 |
+
+**Read these as directional, not absolute.** The same model both answers and
+grades its own answers, which inflates faithfulness and relevancy
+(self-grading bias). Groq's daily token quota can also turn a run's judge
+calls into `nan` instead of a score — re-run it yourself for current numbers.
 
 ## Known limitations
 
@@ -227,20 +233,6 @@ that does not.
   field, which is already short.
 - **This is not a licensed insurance product.** Results are estimates from
   demo records and public documents, and carry no weight with any insurer.
-
-### Recently fixed
-
-Table-derived chunks were indexed under the *table's* type (`modern_treatment`,
-`copayment`, `room_rent`) while the retrieval tools filter on the *clause*
-topics the chunker uses (`coverage`, `sub_limit`, `copay`). Those two
-vocabularies never met, so entire tables sat in Pinecone — correct, citable,
-and unreachable by any tool. A "Robotic surgeries covered up to Rs X" row
-could not be found by a robotic-surgery coverage query. `TABLE_TYPE_TOPICS` in
-`src/ingestion/table_classifier.py` now maps one vocabulary onto the other.
-
-Separately, the Pinecone upsert retry helper had been deleted in an earlier
-refactor while its two call sites remained, so indexing raised `NameError` on
-the first batch. It is now a `tenacity` policy.
 
 ## Project structure
 
@@ -281,58 +273,31 @@ health-agentic-rag/
     cache/rag_cache.py        TTL cache, keyed by query + topic + UIN
     crm/, policy_data/,
     decisions/                SQLite models and stores
-    utils/sqlite_store.py     Shared connection and schema bootstrap
+    utils/
+      sqlite_store.py         Shared connection and schema bootstrap
+      logging.py              configure_logging(), used by every entry point
   evaluation/
     claims_dataset.json       15 labelled claims - the correctness benchmark
     rag_dataset.json          10 policy-evidence questions
     run_ragas.py              The RAGAS runner (Groq, both roles)
-  tests/
+    baseline_results.json     Latest RAGAS scores
+  tests/                      ~180 tests -- uv run pytest
 ```
 
 ## How it fits together
 
-**Two layers.** `src/agent/agent.py` is LangChain's `create_agent` — it owns
-the tool-calling loop and nothing here hand-rolls it. `src/agent/workflow.py`
-is a LangGraph `StateGraph` with the compiled agent added as a node. The
-workflow owns persistence; the agent inherits its checkpointer as a subgraph.
-
-**Two agent instances, one builder.** Chat and claim explanation need
-different shapes of answer, so `agent.py` builds two: `get_agent()` for
-`/chat` (free text, full tool access) and `get_claims_agent()` for the review
-node (`response_format=ClaimExplanation`, no tools). The second is
-structured output via `create_agent`'s own contract, not hand-parsed text —
-`review_node` reads `state["structured_response"].reasoning` directly. It has
-no tools because Groq's API refuses to combine JSON response format with
-tool calling in one call; that node was never the one doing lookups anyway,
-since the prompt already hands it the finished eligibility result. Even with
-structured output, `status` and `payable_amount` are not fields the model is
-asked to fill in — see `ClaimRecommendation.from_engine()`.
-
-**Human review is `interrupt()`.** No hand-rolled "awaiting approval" flag. The
-graph stops, checkpoints itself, and hands back the recommendation. The UI
-resumes the same `thread_id` with `Command(resume=...)`. Everything before the
-interrupt is a pure function of state, because it runs twice.
-
-**Customer scoping is structural.** `customer_id` arrives as runtime `Context`
-and reaches tools through `ToolRuntime`, so it never appears in the schema the
-model sees. The model cannot pass another customer's ID because it cannot pass
-one at all.
-
-**The recommendation is assembled, not asked for.** `ClaimRecommendation` takes
-its status, payable amount, evidence and missing-information list from the
-engine, and only the prose from the model. The model cannot contradict a figure
-it is never asked to produce.
-
-**Citations run end to end.** Every chunk is tagged with `insurer`, `uin`,
-`page` and `topics` at ingestion; table rows are rewritten as sentences with
-the citation baked into the text; retrieval filters on that metadata *before*
-searching; the engine carries it into its evidence; and the prompt enforces
-`[Source: {insurer}, UIN: {uin}, Page {page}]` at generation time.
-
-## Disclaimer
-
-A demo and portfolio project. Not a licensed insurance product, and it makes
-no real insurance decisions. Eligibility results are estimates from seeded
-demo records and public documents. The customer data is fabricated. The policy
-PDFs are real public IRDAI documents — confirm anything important against your
-own policy wording and your insurer.
+- **Two layers, not one.** `create_agent` owns tool-calling; a `StateGraph`
+  wraps it as a node and owns persistence, so the workflow can pause and
+  resume the agent without the agent knowing it happened.
+- **Human review is `interrupt()`, not a hand-rolled flag.** The graph stops,
+  checkpoints itself, and hands back the recommendation; the UI resumes the
+  same thread once the employee decides.
+- **Customer scoping is structural.** `customer_id` arrives as runtime
+  context, not a model-visible argument — the model can't leak or guess
+  another customer's ID because it never sees one to pass.
+- **The recommendation is assembled, not asked for.** Status and payable
+  amount come from the eligibility engine; the model only writes the prose
+  explaining them, so it can't contradict a figure it never produced.
+- **Citations run end to end.** Every chunk is tagged at ingestion, retrieval
+  filters on that tag before searching, and the prompt enforces
+  `[Source: {insurer}, UIN: {uin}, Page {page}]` on every policy-derived fact.

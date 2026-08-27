@@ -1,6 +1,6 @@
 """Populate every SQLite table with realistic demo data.
 
-Run it with:  uv run python data/seed.py
+Run it with:  uv run python Data/seed.py
 
 Five customers are hand-designed to cover the scenarios the eligibility
 engine has to handle correctly:
