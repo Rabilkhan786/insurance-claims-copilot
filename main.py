@@ -1,5 +1,8 @@
 """Root entry point for the PDF-to-Pinecone indexing workflow.
 
+Run with:  uv run python main.py           (add to the existing index)
+           uv run python main.py --reset   (wipe the namespace first, then rebuild)
+
 Runs the section-aware pipeline (src/ingestion/pipeline.py) over every PDF
 in Data/insurance_documents/ and upserts the result into Pinecone.
 Upserts are idempotent -- document IDs hash the chunk's own content -- so
@@ -7,9 +10,9 @@ re-running overwrites the same vectors rather than duplicating them.
 """
 from __future__ import annotations
 
+import argparse
 import json
 import logging
-import sys
 from datetime import UTC, datetime
 
 from config import settings
@@ -79,7 +82,15 @@ def main() -> None:
     """Parse every policy PDF, embed the chunks, and upload them."""
     configure_logging()
 
-    if "--reset" in sys.argv:
+    parser = argparse.ArgumentParser(description="Index policy PDFs into Pinecone")
+    parser.add_argument(
+        "--reset",
+        action="store_true",
+        help="Wipe the namespace first, then rebuild from scratch",
+    )
+    args = parser.parse_args()
+
+    if args.reset:
         print("Clearing the index before rebuilding...")
         clear_index()
 
