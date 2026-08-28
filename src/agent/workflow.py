@@ -108,6 +108,9 @@ def _to_bill_data(claim: dict) -> dict:
     """
     return {
         "treatment": claim.get("treatment") or claim.get("procedure") or "",
+        # Passed through even when treatment is filled in -- the engine
+        # (src/eligibility/engine.py) only reads this as a fallback when
+        # treatment is blank. It plays no part in the decision otherwise.
         "diagnosis": claim.get("diagnosis") or "",
         "total_amount": claim.get("claim_amount") or claim.get("total_amount") or 0,
         "hospital": claim.get("hospital") or "",
@@ -207,6 +210,7 @@ def persist_decision_node(state: WorkflowState) -> dict:
             employee_edits=decision.get("edits"),
             override_reason=decision.get("reason"),
             decided_by=decision.get("decided_by") or "unknown",
+            notes=claim.get("notes"),
         )
     except Exception:
         # A failed audit write must be loud in the log, but it should not

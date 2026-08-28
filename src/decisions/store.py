@@ -49,6 +49,7 @@ class DecisionStore(SqliteStore):
         employee_payable_amount: float | None = None,
         employee_edits: str | None = None,
         override_reason: str | None = None,
+        notes: str | None = None,
     ) -> str:
         """Save one reviewed recommendation and return its decision_id."""
         if employee_decision not in EMPLOYEE_DECISIONS:
@@ -72,6 +73,7 @@ class DecisionStore(SqliteStore):
             override_reason,
             agreed,
             decided_by,
+            notes,
         )
         print(
             f"decision recorded: claim={claim_id} ai={ai_decision} "
@@ -81,7 +83,7 @@ class DecisionStore(SqliteStore):
 
     def _insert(self, decision_id, claim_id, customer_id, policy_id, ai_decision,
                 recommendation, employee_decision, employee_payable_amount,
-                employee_edits, override_reason, agreed, decided_by) -> None:
+                employee_edits, override_reason, agreed, decided_by, notes) -> None:
         """Write the row. Split out so record() stays readable."""
         with self._connect() as connection:
             connection.execute(
@@ -89,14 +91,14 @@ class DecisionStore(SqliteStore):
                 "decision_id, claim_id, customer_id, policy_id, ai_decision, "
                 "ai_payable_amount, ai_recommendation, employee_decision, "
                 "employee_payable_amount, employee_edits, override_reason, "
-                "agreed, decided_by) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "agreed, decided_by, notes) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     decision_id, claim_id, customer_id, policy_id, ai_decision,
                     recommendation.get("payable_amount"),
                     json.dumps(recommendation, default=str),
                     employee_decision, employee_payable_amount, employee_edits,
-                    override_reason, agreed, decided_by,
+                    override_reason, agreed, decided_by, notes,
                 ),
             )
 

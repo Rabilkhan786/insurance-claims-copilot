@@ -32,6 +32,11 @@ CREATE TABLE IF NOT EXISTS claim_decisions (
     employee_edits      TEXT,
     override_reason     TEXT,
 
+    -- Free text the employee wrote on the claim form before analysing it
+    -- (e.g. "patient asked to expedite"). Carried through so it is not lost
+    -- once the review screen closes.
+    notes               TEXT,
+
     -- agreed = did the human land on the same call as the AI? Stored rather
     -- than derived so a later schema change cannot silently rewrite history.
     agreed              INTEGER NOT NULL DEFAULT 0,
