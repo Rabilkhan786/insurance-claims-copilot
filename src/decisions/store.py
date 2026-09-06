@@ -1,4 +1,4 @@
-"""SQLite-backed audit trail: what the AI recommended vs what the employee did."""
+"""SQLite-backed audit trail for AI recommendations and employee decisions."""
 from __future__ import annotations
 
 import json
@@ -17,7 +17,7 @@ AI_DECISIONS = ("approve", "reject", "needs_more_info")
 
 
 def _ai_decision_from(recommendation: dict) -> str:
-    """Read the AI's recommendation status."""
+    """Read the AI recommendation status."""
     status = recommendation.get("status")
     return status if status in AI_DECISIONS else "needs_more_info"
 
@@ -46,10 +46,10 @@ class DecisionStore(SqliteStore):
             raise ValueError(f"employee_decision must be one of {EMPLOYEE_DECISIONS}")
 
         ai_decision = _ai_decision_from(recommendation)
-        # Agreement means the employee made the same approve/reject call as
-        # the AI. An edit is always an override, and needs_more_info has no
-        # matching employee action.
-        agreed = int(employee_decision == ai_decision and ai_decision in {"approve", "reject"})
+        agreed = int(
+            employee_decision == ai_decision
+            and ai_decision in {"approve", "reject"}
+        )
         decision_id = str(uuid4())
 
         self._insert(
@@ -67,9 +67,12 @@ class DecisionStore(SqliteStore):
             decided_by,
             notes,
         )
-        print(
-            f"decision recorded: claim={claim_id} ai={ai_decision} "
-            f"employee={employee_decision} agreed={bool(agreed)}"
+        logger.info(
+            "decision_recorded claim_id=%s ai=%s employee=%s agreed=%s",
+            claim_id,
+            ai_decision,
+            employee_decision,
+            bool(agreed),
         )
         return decision_id
 
@@ -99,16 +102,25 @@ class DecisionStore(SqliteStore):
                 "agreed, decided_by, notes) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
-                    decision_id, claim_id, customer_id, policy_id, ai_decision,
+                    decision_id,
+                    claim_id,
+                    customer_id,
+                    policy_id,
+                    ai_decision,
                     recommendation.get("payable_amount"),
                     json.dumps(recommendation, default=str),
-                    employee_decision, employee_payable_amount, employee_edits,
-                    override_reason, agreed, decided_by, notes,
+                    employee_decision,
+                    employee_payable_amount,
+                    employee_edits,
+                    override_reason,
+                    agreed,
+                    decided_by,
+                    notes,
                 ),
             )
 
     def get(self, decision_id: str) -> dict | None:
-        """Read one decision back, with recommendation JSON parsed."""
+        """Read one decision back, parsing the recommendation JSON."""
         with self._connect() as connection:
             row = connection.execute(
                 "SELECT * FROM claim_decisions WHERE decision_id = ?",
@@ -145,5 +157,8 @@ class DecisionStore(SqliteStore):
         try:
             record["ai_recommendation"] = json.loads(record["ai_recommendation"])
         except (TypeError, ValueError):
-            logger.warning("bad_recommendation_json decision_id=%s", record.get("decision_id"))
+            logger.warning(
+                "bad_recommendation_json decision_id=%s",
+                record.get("decision_id"),
+            )
         return record
