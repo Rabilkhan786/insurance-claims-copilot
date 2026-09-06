@@ -78,8 +78,32 @@ def waiting_period_tracker(
     return result
 
 
-def compute_sum_insured_balance(policy_id: str, customer_id: str) -> dict:
-    """Calculate the remaining sum insured for a customer policy."""
+def _select_copay(copayments: list[dict], treatment: str | None = None) -> float:
+    """Resolve the applicable co-pay from rows already filtered to the policy."""
+    if not copayments:
+        return 0
+
+    if treatment:
+        normalized = treatment.lower().replace("_", " ")
+        for row in copayments:
+            condition = (row.get("condition") or "").lower()
+            if normalized in condition:
+                return row["copay_percent"]
+
+    for row in copayments:
+        if "all claims" in (row.get("condition") or "").lower():
+            return row["copay_percent"]
+
+    return copayments[0]["copay_percent"]
+
+
+def compute_sum_insured_balance(
+    policy_id: str,
+    customer_id: str,
+    treatment: str | None = None,
+    age: int | None = None,
+) -> dict:
+    """Calculate remaining sum insured and policy-level deductions."""
     policy = get_crm_store().get_policy(policy_id)
     if policy is None or policy["customer_id"] != customer_id:
         return {"error": "Policy not found for this customer."}
@@ -99,15 +123,15 @@ def compute_sum_insured_balance(policy_id: str, customer_id: str) -> dict:
 
     policy_uin = policy["policy_number"]
     deductible_row = get_policy_store().find_deductible(policy_uin)
-    copayments = get_policy_store().get_copayments(policy_uin)
-
+    copayments = get_policy_store().get_copayments(policy_uin, age=age)
     sum_insured = policy["sum_insured"]
+
     return {
         "sum_insured": sum_insured,
         "claims_used": claims_used,
         "remaining_balance": max(0, sum_insured - claims_used),
         "deductible": deductible_row["deductible_amount"] if deductible_row else 0,
-        "copay_percent": copayments[0]["copay_percent"] if copayments else 0,
+        "copay_percent": _select_copay(copayments, treatment),
     }
 
 
