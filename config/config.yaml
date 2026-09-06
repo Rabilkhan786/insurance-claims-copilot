@@ -1,17 +1,12 @@
-# An internal copilot for claims employees, not a customer chatbot.
-# The project's name lives in pyproject.toml; it was duplicated here and read
-# by nothing, which is one more place for the two to drift apart.
 project:
   data_dir: Data/insurance_documents
   artifacts_dir: artifacts
-
 
 models:
   embedding: BAAI/bge-base-en-v1.5
   cross_encoder: BAAI/bge-reranker-base
   llm: openai/gpt-oss-120b
   temperature: 0.0
-
 
 pinecone:
   dense_index: insurance-rag
@@ -23,16 +18,11 @@ pinecone:
   dense_metric: cosine
   sparse_model: pinecone-sparse-english-v0
 
-
 retrieval:
   dense_top_k: 15
   sparse_top_k: 15
-  # Raised to retrieve more candidates before reranking. Cross-encoder now has
-  # more chances to find exclusion clauses (Q5, Q6) and waiting periods (Q1, Q7).
-  # Reranker filters down to top 8. Adds ~100ms per query but fixes 3-4 questions.
   final_top_k: 8
   rrf_k: 60
-
 
 chunking:
   strategy: section_aware
@@ -54,10 +44,6 @@ api:
   port: 8000
 
 database:
-  # crm.db holds everything the copilot reads and writes: customers,
-  # policies, claims, the policy tables extracted from the PDFs, and the
-  # claim_decisions audit trail. Graph state lives in checkpoints.db, which
-  # LangGraph's SqliteSaver manages itself.
   crm_path: data/crm.db
 
 batch_size: 96

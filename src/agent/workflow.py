@@ -1,20 +1,4 @@
-"""Layer 2 — the outer workflow: a claim goes in, a reviewed decision comes out.
-
-    claim submitted -> eligibility -> agent -> review (pauses) -> persist -> END
-    chat question   -> agent -> END
-
-The compiled create_agent graph from Layer 1 is added here as an ordinary node
-(subgraph-as-node), so the claim path ends with the agent turning a decision
-the deterministic engine already made into readable reasoning for an employee.
-
-The review step uses LangGraph's interrupt(): the graph stops, its state is
-checkpointed, and the caller is handed the recommendation. Nothing here
-hand-rolls a "waiting for approval" flag -- the client resumes the same
-thread_id with Command(resume=...) and the graph picks up where it stopped.
-
-customer_id is never parsed out of message text -- it arrives as Context at
-invoke time and reaches the tools through ToolRuntime.
-"""
+"""LangGraph workflow for claim review and employee chat."""
 from __future__ import annotations
 
 import logging
@@ -37,54 +21,30 @@ logger = logging.getLogger(__name__)
 
 
 class WorkflowState(MessagesState, total=False):
-    """MessagesState supplies `messages`; these are the claim-path extras."""
+    """MessagesState plus fields used by the claim-review path."""
 
     claim: dict[str, Any] | None
     claim_id: str | None
     policy_id: str | None
-    # Persisted in state, not read from Context at the end: the graph is
-    # resumed with Command(resume=...), which carries no Context, so
-    # runtime.context is None in every node after the interrupt.
     customer_id: str | None
     eligibility: dict[str, Any] | None
-    # Written by explain_claim (the structured-output agent), read once by
-    # review_node and never touched again. ClaimExplanation, not
-    # ClaimRecommendation -- see recommendation.py for why the two are
-    # different shapes.
     structured_response: Any | None
-    # The typed ClaimRecommendation, flattened. Built once in review_node so
-    # the payload the employee saw is exactly what the audit row stores.
     recommendation: dict[str, Any] | None
     decision: dict[str, Any] | None
     error: str | None
 
 
-# The engine has already decided. The agent's only job here is to explain that
-# decision to an employee -- which is why the figures are declared final.
-WRITE_RECOMMENDATION_PROMPT = """Write a claim recommendation for the claims \
-employee reviewing this file. The figures below are final -- do not \
-recalculate them, do not round them, and do not introduce any amount that is \
-not listed.
+WRITE_RECOMMENDATION_PROMPT = """Write a claim recommendation for the claims employee reviewing this file. The figures below are final -- do not recalculate them, do not round them, and do not introduce any amount that is not listed.
 
 Structure it as:
 1. Recommend: approve / reject / needs more info -- and why, in one sentence.
-2. The payable amount, and which deduction reduced the bill to it. If the \
-status is needs_more_info there is no payable amount yet -- say what has to \
-be established before one can be calculated, and do not invent a figure.
-3. The policy clauses that support the decision, each with its citation in \
-the exact format [Source: {{insurer}}, UIN: {{uin}}, Page {{page}}].
+2. The payable amount, and which deduction reduced the bill to it. If the status is needs_more_info there is no payable amount yet -- say what has to be established before one can be calculated, and do not invent a figure.
+3. The policy clauses that support the decision, each with its citation in the exact format [Source: {{insurer}}, UIN: {{uin}}, Page {{page}}].
 4. Anything missing that the employee should chase before deciding.
 
-Read the per-fact statuses before you write. Only "unknown" belongs under \
-"Missing information" or as something you "could not find" -- that status \
-means the fact was never established. A "not_applicable" fact is the \
-opposite: it means the policy was checked and confirmed to state no such \
-condition. Report it as a finding in section 3, in the same words as its \
-detail (e.g. "this plan carries no deductible; it pays from rupee one"), \
-never as something absent or unlocatable.
+Read the per-fact statuses before you write. Only "unknown" belongs under "Missing information" or as something you "could not find". A "not_applicable" fact means the policy was checked and confirmed to state no such condition; report it as a finding rather than as something absent.
 
-This is a recommendation for a human to review, never a final answer. Do not \
-write "the claim is approved" -- write "recommend: approve".
+This is a recommendation for a human to review, never a final answer. Do not write "the claim is approved" -- write "recommend: approve".
 
 Engine result:
 {eligibility}
@@ -95,31 +55,37 @@ Claim as submitted:
 
 @lru_cache(maxsize=1)
 def get_decision_store() -> DecisionStore:
-    """Return the shared audit-trail store, building it once per process."""
+    """Return the shared audit-trail store."""
     return DecisionStore(settings.crm_db_path)
 
 
 def _to_bill_data(claim: dict) -> dict:
-    """Map the employee's form fields onto what the engine expects.
+    """Map employee form fields to the eligibility engine schema."""
+    treatment = claim.get("treatment")
+    if treatment is None or treatment == "":
+        treatment = claim.get("procedure") or ""
 
-    check_eligibility reads `treatment`/`diagnosis` and `total_amount`. It has
-    no idea the dict came from a form rather than anywhere else, which is why
-    the engine itself needed no change when the bill-upload path was removed.
-    """
+    total_amount = claim.get("claim_amount")
+    if total_amount is None:
+        total_amount = claim.get("total_amount")
+    if total_amount is None:
+        total_amount = 0
+
+    admission_date = claim.get("treatment_date")
+    if admission_date is None:
+        admission_date = claim.get("admission_date")
+
     return {
-        "treatment": claim.get("treatment") or claim.get("procedure") or "",
-        # Passed through even when treatment is filled in -- the engine
-        # (src/eligibility/engine.py) only reads this as a fallback when
-        # treatment is blank. It plays no part in the decision otherwise.
+        "treatment": treatment,
         "diagnosis": claim.get("diagnosis") or "",
-        "total_amount": claim.get("claim_amount") or claim.get("total_amount") or 0,
+        "total_amount": total_amount,
         "hospital": claim.get("hospital") or "",
-        "admission_date": claim.get("treatment_date") or claim.get("admission_date"),
+        "admission_date": admission_date,
     }
 
 
 def eligibility_node(state: WorkflowState, runtime: Runtime[Context]) -> dict:
-    """Run the deterministic checklist, then queue its result for explanation."""
+    """Run deterministic eligibility and prepare the explanation prompt."""
     customer_id = runtime.context.customer_id
     policy_id = state.get("policy_id")
     if not customer_id or not policy_id:
@@ -127,12 +93,20 @@ def eligibility_node(state: WorkflowState, runtime: Runtime[Context]) -> dict:
 
     claim = state.get("claim") or {}
     bill_data = _to_bill_data(claim)
-    print(f"eligibility_node: checking {bill_data.get('treatment')!r} for {customer_id}")
+    logger.info(
+        "eligibility_check customer_id=%s policy_id=%s treatment=%r",
+        customer_id,
+        policy_id,
+        bill_data["treatment"],
+    )
 
     eligibility = check_eligibility(bill_data, customer_id, policy_id)
-    print(
-        f"eligibility_node: status={eligibility.get('status')} "
-        f"payable={eligibility.get('estimated_payable')}"
+    logger.info(
+        "eligibility_result customer_id=%s policy_id=%s status=%s payable=%s",
+        customer_id,
+        policy_id,
+        eligibility.get("status"),
+        eligibility.get("estimated_payable"),
     )
 
     return {
@@ -141,7 +115,8 @@ def eligibility_node(state: WorkflowState, runtime: Runtime[Context]) -> dict:
         "messages": [
             HumanMessage(
                 WRITE_RECOMMENDATION_PROMPT.format(
-                    eligibility=eligibility, claim=claim
+                    eligibility=eligibility,
+                    claim=claim,
                 )
             )
         ],
@@ -149,15 +124,7 @@ def eligibility_node(state: WorkflowState, runtime: Runtime[Context]) -> dict:
 
 
 def _explanation_text(state: WorkflowState) -> str:
-    """Read the model's prose, structured output first.
-
-    explain_claim runs with response_format=ClaimExplanation, so its answer
-    lands in structured_response.reasoning rather than as a plain AIMessage
-    -- no scanning the message list for the last one. The messages-based
-    fallback exists for the state a caller builds by hand (this file's own
-    tests stub the agent node without response_format), not for anything the
-    real graph produces.
-    """
+    """Read structured explanation output, with a test-friendly fallback."""
     structured = state.get("structured_response")
     if structured is not None:
         return _normalise_citations(structured.reasoning)
@@ -165,20 +132,12 @@ def _explanation_text(state: WorkflowState) -> str:
 
 
 def review_node(state: WorkflowState) -> dict:
-    """Hand the recommendation to the employee and wait for their call.
-
-    interrupt() raises the first time through: LangGraph checkpoints the state
-    and returns this payload to whoever invoked the graph. When the client
-    resumes with Command(resume=...), the node runs again from the top and
-    interrupt() returns that value instead of raising -- so everything above
-    it has to be safe to run twice. It is: building the recommendation is a
-    pure function of state, with no writes and no tool calls.
-    """
+    """Pause for employee review and return the selected decision on resume."""
     recommendation = ClaimRecommendation.from_engine(
         state.get("eligibility") or {},
         reasoning=_explanation_text(state),
     )
-    print(f"review_node: pausing for employee review ({recommendation.status})")
+    logger.info("review_waiting status=%s", recommendation.status)
 
     decision = interrupt(
         {
@@ -187,12 +146,15 @@ def review_node(state: WorkflowState) -> dict:
         }
     )
 
-    print(f"review_node: employee chose {decision.get('decision')!r}")
-    return {"recommendation": recommendation.model_dump(), "decision": decision}
+    logger.info("review_completed decision=%s", decision.get("decision"))
+    return {
+        "recommendation": recommendation.model_dump(),
+        "decision": decision,
+    }
 
 
 def persist_decision_node(state: WorkflowState) -> dict:
-    """Write the AI recommendation and the employee's decision side by side."""
+    """Persist the recommendation and the employee decision in the audit trail."""
     decision = state.get("decision") or {}
     claim = state.get("claim") or {}
 
@@ -201,9 +163,6 @@ def persist_decision_node(state: WorkflowState) -> dict:
             claim_id=state.get("claim_id") or claim.get("claim_id") or str(uuid4()),
             customer_id=state.get("customer_id") or "",
             policy_id=state.get("policy_id"),
-            # The whole typed recommendation is the audit record: the status,
-            # the figure, the reasoning the employee actually read, and the
-            # evidence behind it. It is never overwritten by their answer.
             recommendation=state.get("recommendation") or {},
             employee_decision=decision.get("decision", "approve"),
             employee_payable_amount=decision.get("payable_amount"),
@@ -213,8 +172,6 @@ def persist_decision_node(state: WorkflowState) -> dict:
             notes=claim.get("notes"),
         )
     except Exception:
-        # A failed audit write must be loud in the log, but it should not
-        # throw away the decision the employee already made.
         logger.exception("audit_write_failed claim_id=%s", state.get("claim_id"))
         return {"error": "The decision was made but could not be written to the audit trail."}
 
@@ -222,17 +179,10 @@ def persist_decision_node(state: WorkflowState) -> dict:
 
 
 def _route_entry(state: WorkflowState) -> str:
-    """Send a submitted claim down the eligibility path, chat to the agent."""
     return "eligibility" if state.get("claim") else "agent"
 
 
 def _after_eligibility(state: WorkflowState) -> str:
-    """Only ask for an explanation of a decision that was actually produced.
-
-    explain_claim always leads to review once reached -- there is no longer
-    a branch here for "explained, but not actually a claim", because the two
-    tasks now run on two different nodes instead of one shared one.
-    """
     return END if state.get("error") else "explain_claim"
 
 
@@ -244,50 +194,38 @@ def get_workflow():
     global _workflow
     if _workflow is None:
         builder = StateGraph(WorkflowState, context_schema=Context)
-
         builder.add_node("eligibility", eligibility_node)
-        # Two agent instances, not one: explain_claim runs with
-        # response_format=ClaimExplanation (see get_claims_agent), so its
-        # reply is validated JSON review_node reads directly. agent stays
-        # free text -- chat is prose, and stream_agent() reads token-by-token
-        # AIMessage chunks that structured output does not produce the same
-        # way.
         builder.add_node("agent", get_agent())
         builder.add_node("explain_claim", get_claims_agent())
         builder.add_node("review", review_node)
         builder.add_node("persist_decision", persist_decision_node)
 
         builder.add_conditional_edges(
-            START, _route_entry, {"eligibility": "eligibility", "agent": "agent"}
+            START,
+            _route_entry,
+            {"eligibility": "eligibility", "agent": "agent"},
         )
         builder.add_conditional_edges(
-            "eligibility", _after_eligibility, {"explain_claim": "explain_claim", END: END}
+            "eligibility",
+            _after_eligibility,
+            {"explain_claim": "explain_claim", END: END},
         )
         builder.add_edge("explain_claim", "review")
         builder.add_edge("agent", END)
         builder.add_edge("review", "persist_decision")
         builder.add_edge("persist_decision", END)
-
-        # interrupt() only works when the graph can persist itself, so the
-        # checkpointer is required here, not optional.
         _workflow = builder.compile(checkpointer=get_checkpointer())
         logger.info("workflow_built")
     return _workflow
 
 
 def _normalise_citations(text: str) -> str:
-    """Force citation markers to plain ASCII brackets.
-
-    The model sometimes emits full-width 【Source: ...】 despite the prompt.
-    Rewriting the bracket characters is purely cosmetic -- it never changes
-    the insurer, UIN or page inside -- and it keeps the citation format the
-    UI and tests rely on stable.
-    """
+    """Normalize full-width citation brackets to plain ASCII brackets."""
     return text.replace("【", "[").replace("】", "]")
 
 
 def _last_ai_text(messages: list) -> str:
-    """Find the final assistant message's text content."""
+    """Return the final non-empty assistant message."""
     for message in reversed(messages):
         if isinstance(message, AIMessage) and message.content:
             return _normalise_citations(message.content)
@@ -295,12 +233,10 @@ def _last_ai_text(messages: list) -> str:
 
 
 def _thread_config(session_id: str) -> dict:
-    """Build the config that scopes checkpointed state to one review thread."""
     return {"configurable": {"thread_id": session_id}}
 
 
 def _interrupt_payload(state: dict) -> dict | None:
-    """Pull the recommendation out of a graph run that stopped at review."""
     interrupts = state.get("__interrupt__")
     if not interrupts:
         return None
@@ -313,16 +249,14 @@ def run_claim_review(
     policy_id: str,
     session_id: str | None = None,
 ) -> dict:
-    """Analyse one claim and stop at the review step.
-
-    Returns the recommendation for the employee to act on. The graph is left
-    paused on this session_id -- call submit_decision() to finish it.
-    """
+    """Analyse a claim and pause for employee review."""
     session_id = session_id or str(uuid4())
     try:
         logger.info(
             "claim_review session_id=%s customer_id=%s policy_id=%s",
-            session_id, customer_id, policy_id,
+            session_id,
+            customer_id,
+            policy_id,
         )
         state = get_workflow().invoke(
             {
@@ -336,8 +270,6 @@ def run_claim_review(
 
         pending = _interrupt_payload(state)
         if pending is None:
-            # No interrupt means the run stopped early -- usually a missing
-            # policy, caught in eligibility_node.
             return {
                 "session_id": session_id,
                 "awaiting_review": False,
@@ -367,11 +299,13 @@ def submit_decision(
     edits: str | None = None,
     reason: str | None = None,
 ) -> dict:
-    """Resume a paused review with the employee's decision, and record it."""
+    """Resume a paused review with the employee's decision."""
     try:
         logger.info(
             "decision_submitted session_id=%s decision=%s by=%s",
-            session_id, decision, decided_by,
+            session_id,
+            decision,
+            decided_by,
         )
         state = get_workflow().invoke(
             Command(
@@ -404,12 +338,14 @@ def run_agent(
     session_id: str | None = None,
     customer_id: str | None = None,
 ) -> dict:
-    """Answer one chat question. Memory comes from the checkpointer's thread."""
+    """Answer one chat question using checkpointed conversation memory."""
     session_id = session_id or str(uuid4())
     try:
         logger.info(
             "agent_question=%r session_id=%s customer_id=%s",
-            question, session_id, customer_id,
+            question,
+            session_id,
+            customer_id,
         )
         final_state = get_workflow().invoke(
             {"messages": [HumanMessage(question)]},
@@ -435,13 +371,7 @@ def stream_agent(
     session_id: str | None = None,
     customer_id: str | None = None,
 ):
-    """Yield the answer token by token as the model produces it.
-
-    stream_mode="messages" hands back each LLM chunk as it arrives, so the
-    UI can paint words immediately. subgraphs=True is required because the
-    agent runs as a subgraph inside this workflow -- without it the answer
-    arrives as one block. Tool-call chunks carry no text and are skipped.
-    """
+    """Yield assistant text chunks as the agent produces them."""
     session_id = session_id or str(uuid4())
     try:
         for _namespace, payload in get_workflow().stream(

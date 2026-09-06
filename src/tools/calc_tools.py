@@ -1,10 +1,4 @@
-"""Agent-facing calculation tools — pure Python, no LLM.
-
-The LLM never does arithmetic on money or dates in this project. It calls
-these functions and reports their results, so the same claim produces the
-same figure every time it is assessed, and the audit trail can be replayed.
-"""
-from __future__ import annotations
+"""Calculation tools for dates and claim amounts."""
 
 from calendar import monthrange
 from datetime import date, datetime
@@ -17,7 +11,6 @@ from src.policy_data import get_policy_store
 
 
 def _parse_date(value: str | date) -> date:
-    """Accept either a date/datetime object or an ISO-formatted string."""
     if isinstance(value, datetime):
         return value.date()
     if isinstance(value, date):
@@ -26,7 +19,6 @@ def _parse_date(value: str | date) -> date:
 
 
 def _add_months(start: date, months: int) -> date:
-    """Add whole months to a date, clamping to the shorter month's length."""
     month_index = start.month - 1 + months
     year = start.year + month_index // 12
     month = month_index % 12 + 1
@@ -35,12 +27,6 @@ def _add_months(start: date, months: int) -> date:
 
 
 def compute_age(date_of_birth: str | date, as_of: str | date) -> int:
-    """Age in whole years at as_of -- the same rule underwriting age uses.
-
-    Subtracting years alone overstates age by one for anyone whose birthday
-    this year has not happened yet by as_of; this steps back a year in that
-    case so someone born 2000-06-15 is still 25 (not 26) on 2026-05-01.
-    """
     birth = _parse_date(date_of_birth)
     reference = _parse_date(as_of)
     age = reference.year - birth.year
@@ -49,18 +35,13 @@ def compute_age(date_of_birth: str | date, as_of: str | date) -> int:
     return age
 
 
-# ---------------------------------------------------------------------------
-# 1. Waiting period date math
-# ---------------------------------------------------------------------------
 def compute_waiting_period(
     policy_start_date: str | date,
     waiting_period_months: int,
     today: str | date | None = None,
 ) -> dict:
-    """Core date math, callable directly by the eligibility engine."""
     start = _parse_date(policy_start_date)
     as_of = _parse_date(today) if today else date.today()
-
     eligible_date = _add_months(start, waiting_period_months)
     days_remaining = max(0, (eligible_date - as_of).days)
 
@@ -78,29 +59,17 @@ def waiting_period_tracker(
     runtime: ToolRuntime,
     waiting_period_months: int | None = None,
 ) -> dict:
-    """Give the exact date cover for a condition begins on this customer's
-    policy, returning eligible_date, days_remaining and is_eligible.
-    Pass policy_id from get_policies and the condition (e.g. maternity,
-    cataract). The waiting period is looked up automatically — only pass
-    waiting_period_months if a clause stated a number this policy's records
-    lack. Always finish a waiting-period question with this tool."""
+    """Return when coverage starts for a waiting-period condition."""
     policy = get_crm_store().get_policy(policy_id)
     if policy is None or policy["customer_id"] != runtime.context.customer_id:
         return {"error": "Policy not found for this customer."}
 
-    # Most waiting periods live in a table that was routed to SQL, not in the
-    # clause text, so the number usually has to come from here.
     if waiting_period_months is None:
         record = get_policy_store().find_waiting_period(
             policy["policy_number"], condition
         )
         if record is None:
-            return {
-                "error": (
-                    f"No waiting period on record for '{condition}' under this "
-                    f"policy."
-                )
-            }
+            return {"error": f"No waiting period found for '{condition}'."}
         waiting_period_months = record["waiting_period_months"]
 
     result = compute_waiting_period(policy["start_date"], waiting_period_months)
@@ -109,69 +78,75 @@ def waiting_period_tracker(
     return result
 
 
-# ---------------------------------------------------------------------------
-# 2. Sum insured balance
-# ---------------------------------------------------------------------------
-def compute_sum_insured_balance(policy_id: str, customer_id: str) -> dict:
-    """Core sum-insured arithmetic, callable directly by the eligibility engine.
+def _select_copay(copayments: list[dict], treatment: str | None = None) -> float:
+    """Resolve the applicable co-pay from rows already filtered to the policy."""
+    if not copayments:
+        return 0
 
-    WHY separate from the tool below: the engine already knows the customer_id
-    and runs outside any agent turn, so it has no ToolRuntime to read from.
-    """
+    if treatment:
+        normalized = treatment.lower().replace("_", " ")
+        for row in copayments:
+            condition = (row.get("condition") or "").lower()
+            if normalized in condition:
+                return row["copay_percent"]
+
+    for row in copayments:
+        if "all claims" in (row.get("condition") or "").lower():
+            return row["copay_percent"]
+
+    return copayments[0]["copay_percent"]
+
+
+def compute_sum_insured_balance(
+    policy_id: str,
+    customer_id: str,
+    treatment: str | None = None,
+    age: int | None = None,
+) -> dict:
+    """Calculate remaining sum insured and policy-level deductions."""
     policy = get_crm_store().get_policy(policy_id)
     if policy is None or policy["customer_id"] != customer_id:
         return {"error": "Policy not found for this customer."}
 
     start = _parse_date(policy["start_date"])
     end = _parse_date(policy["end_date"])
-
     claims = get_crm_store().get_claims(customer_id, policy_id)
+
     claims_used = sum(
-        claim["eligible_amount"] or claim["claim_amount"]
+        claim["eligible_amount"]
+        if claim["eligible_amount"] is not None
+        else claim["claim_amount"]
         for claim in claims
         if claim["status"] == "approved"
         and start <= _parse_date(claim["claim_date"]) <= end
     )
 
-    # The deductible and co-pay are policy facts held in SQL. They are returned
-    # here because calculate_payable_amount cannot look them up itself, and
-    # without them the agent silently treats both as zero -- which told a
-    # top-up customer their whole bill was payable when the deductible
-    # actually left them nothing.
     policy_uin = policy["policy_number"]
     deductible_row = get_policy_store().find_deductible(policy_uin)
-    copayments = get_policy_store().get_copayments(policy_uin)
-
+    copayments = get_policy_store().get_copayments(policy_uin, age=age)
     sum_insured = policy["sum_insured"]
+
     return {
         "sum_insured": sum_insured,
         "claims_used": claims_used,
         "remaining_balance": max(0, sum_insured - claims_used),
         "deductible": deductible_row["deductible_amount"] if deductible_row else 0,
-        "copay_percent": copayments[0]["copay_percent"] if copayments else 0,
+        "copay_percent": _select_copay(copayments, treatment),
     }
 
 
 @tool
 def sum_insured_balance(policy_id: str, runtime: ToolRuntime) -> dict:
-    """Report what this customer's policy still pays: sum_insured,
-    claims_used, remaining_balance, plus the policy's deductible and
-    copay_percent. Call this before calculate_payable_amount and pass its
-    deductible and copay_percent straight through — they are often non-zero.
-    Get policy_id from get_policies first."""
+    """Return the remaining sum insured and related deductions."""
     return compute_sum_insured_balance(policy_id, runtime.context.customer_id)
 
 
-# ---------------------------------------------------------------------------
-# 3. Payable amount
-# ---------------------------------------------------------------------------
 def _apply_deductions(
     covered_amount: float,
     copay_percent: float,
     deductible: float,
     remaining_sum_insured: float,
 ) -> dict:
-    """Apply copay and deductible in order, then cap to remaining sum insured."""
     copay_amount = round(covered_amount * (copay_percent / 100), 2)
     after_copay = covered_amount - copay_amount
     after_deductible = max(0, after_copay - deductible)
@@ -191,25 +166,29 @@ def calculate_payable_amount(
     copay_percent: float | None = None,
     deductible: float | None = None,
 ) -> dict:
-    """Compute the actual amount the insurer pays after applying sub-limit,
-    co-payment, and deductible in order. Returns payable_amount and a breakdown
-    of deductions. Never calculate this yourself — always call this tool. Take
-    remaining_sum_insured, deductible and copay_percent from
-    sum_insured_balance; omitting them understates what the customer owes."""
+    """Calculate the insurer's payable amount and deductions."""
     sub_limit = bill_amount if sub_limit is None else sub_limit
-    copay_percent = copay_percent or 0
-    deductible = deductible or 0
+    copay_percent = 0 if copay_percent is None else copay_percent
+    deductible = 0 if deductible is None else deductible
 
     covered_amount = min(bill_amount, sub_limit)
-    sub_limit_reduction = bill_amount - covered_amount
+    deductions = _apply_deductions(
+        covered_amount,
+        copay_percent,
+        deductible,
+        remaining_sum_insured,
+    )
 
-    d = _apply_deductions(covered_amount, copay_percent, deductible, remaining_sum_insured)
     return {
-        "payable_amount": round(d["payable_amount"], 2),
+        "payable_amount": round(deductions["payable_amount"], 2),
         "deductions": {
-            "sub_limit_reduction": round(sub_limit_reduction, 2),
-            "copay_amount": d["copay_amount"],
-            "deductible_amount": round(min(deductible, d["after_copay"]), 2),
-            "capped_by_remaining_sum_insured": d["after_deductible"] > remaining_sum_insured,
+            "sub_limit_reduction": round(bill_amount - covered_amount, 2),
+            "copay_amount": deductions["copay_amount"],
+            "deductible_amount": round(
+                min(deductible, deductions["after_copay"]), 2
+            ),
+            "capped_by_remaining_sum_insured": (
+                deductions["after_deductible"] > remaining_sum_insured
+            ),
         },
     }
