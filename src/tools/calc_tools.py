@@ -89,7 +89,9 @@ def compute_sum_insured_balance(policy_id: str, customer_id: str) -> dict:
     claims = get_crm_store().get_claims(customer_id, policy_id)
 
     claims_used = sum(
-        claim["eligible_amount"] or claim["claim_amount"]
+        claim["eligible_amount"]
+        if claim["eligible_amount"] is not None
+        else claim["claim_amount"]
         for claim in claims
         if claim["status"] == "approved"
         and start <= _parse_date(claim["claim_date"]) <= end
@@ -142,8 +144,8 @@ def calculate_payable_amount(
 ) -> dict:
     """Calculate the insurer's payable amount and deductions."""
     sub_limit = bill_amount if sub_limit is None else sub_limit
-    copay_percent = copay_percent or 0
-    deductible = deductible or 0
+    copay_percent = 0 if copay_percent is None else copay_percent
+    deductible = 0 if deductible is None else deductible
 
     covered_amount = min(bill_amount, sub_limit)
     deductions = _apply_deductions(
