@@ -1,5 +1,5 @@
 [project]
-name = "insurance-claims-copilot"
+name = "health-agentic-rag"
 version = "1.0.0"
 description = "AI claims copilot with hybrid RAG, deterministic eligibility checks, and human-reviewed recommendations."
 readme = "README.md"
