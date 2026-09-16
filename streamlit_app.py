@@ -1,15 +1,4 @@
-"""Claims Copilot - the employee-facing frontend.
-
-Run with:  uv run streamlit run streamlit_app.py
-
-This is an INTERNAL tool. The person using it is a claims employee, not a
-customer. The screen shows a recommendation and the employee decides: the
-Approve / Edit / Reject actions at the bottom are the point of the whole app.
-
-There is no business logic in this file. Every figure on screen came from the
-deterministic engine, every clause from the retrieval layer, and every
-database read goes through the CRM store -- the UI only lays them out.
-"""
+"""Streamlit interface for claims employees."""
 from __future__ import annotations
 
 from datetime import date
@@ -24,14 +13,12 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# How the engine's three states read on screen.
 STATUS_DISPLAY = {
     "approve": ("success", "Recommend: approve"),
     "reject": ("error", "Recommend: reject"),
     "needs_more_info": ("warning", "Recommend: needs more info"),
 }
 
-# A fact's status, in words an employee reads rather than a field value.
 FACT_STATUS_DISPLAY = {
     "found": "established",
     "not_applicable": "does not apply",
@@ -41,7 +28,7 @@ FACT_STATUS_DISPLAY = {
 
 @st.cache_resource(show_spinner="Loading retrieval models - first run only...")
 def _warmup():
-    """Build the embedder and reranker once per process, not per click."""
+    """Load retrieval models once per Streamlit process."""
     from src.tools.rag_tools import warmup
 
     warmup()
@@ -50,7 +37,7 @@ def _warmup():
 
 @st.cache_data(ttl=60)
 def _customers() -> list[dict]:
-    """List real customers from the CRM so no IDs are hardcoded here."""
+    """Return customers for the UI picker."""
     from src.crm import get_crm_store
 
     return get_crm_store().list_customers()
@@ -58,23 +45,20 @@ def _customers() -> list[dict]:
 
 @st.cache_data(ttl=60)
 def _policies_for(customer_id: str) -> list[dict]:
-    """Policies belonging to one customer, for the policy dropdown."""
+    """Return one customer's policies."""
     from src.crm import get_crm_store
 
     return get_crm_store().get_policies(customer_id)
 
 
 def _init_state() -> None:
-    """Session state: one pending review at a time, plus a running chat."""
+    """Initialize claim-review and chat session state."""
     if "session_id" not in st.session_state:
         st.session_state.session_id = str(uuid4())
     if "review" not in st.session_state:
         st.session_state.review = None
     if "saved" not in st.session_state:
         st.session_state.saved = None
-    # A separate thread from the claim review above: chat and claim analysis
-    # are two different graph runs, and sharing one session_id would mix a
-    # customer's chat history into the claim's paused review state.
     if "chat_session_id" not in st.session_state:
         st.session_state.chat_session_id = str(uuid4())
     if "chat_history" not in st.session_state:
@@ -82,29 +66,25 @@ def _init_state() -> None:
 
 
 def _money(value) -> str:
-    """Format a rupee amount, tolerating None.
-
-    None is not zero: it means the engine declined to give a figure because a
-    fact it depends on is missing. Showing "Rs 0.00" there would read as
-    "nothing is payable", which is a different and much stronger claim.
-    """
+    """Format a rupee amount without treating None as zero."""
     if value is None:
         return "not calculated"
     return f"Rs {float(value):,.2f}"
 
 
 def _run_analysis(claim: dict, customer_id: str, policy_id: str) -> None:
-    """Call the workflow and park the result for the review panel."""
+    """Run claim analysis and store the pending review."""
     from src.agent import run_claim_review
 
-    # A fresh thread per analysis: the graph pauses on this id, and resuming
-    # the wrong one would attach the decision to an older claim.
     st.session_state.session_id = str(uuid4())
     st.session_state.saved = None
 
     with st.spinner("Running eligibility checks and retrieving policy clauses..."):
         result = run_claim_review(
-            claim, customer_id, policy_id, st.session_state.session_id
+            claim,
+            customer_id,
+            policy_id,
+            st.session_state.session_id,
         )
 
     if result.get("error"):
@@ -117,13 +97,16 @@ def _run_analysis(claim: dict, customer_id: str, policy_id: str) -> None:
 
 
 def render_claim_form() -> None:
-    """The claim-entry form. Submitting it runs the whole analysis."""
+    """Render the employee claim-entry form."""
     customers = _customers()
     if not customers:
-        st.error("No customers found in the CRM. Run `uv run python Data/seed.py` first.")
+        st.error("No customers found. Run `uv run python Data/seed.py` first.")
         return
 
-    labels = {f"{c['customer_id']} - {c['name']}": c["customer_id"] for c in customers}
+    labels = {
+        f"{customer['customer_id']} - {customer['name']}": customer["customer_id"]
+        for customer in customers
+    }
     chosen = st.selectbox("Customer", list(labels))
     customer_id = labels[chosen]
 
@@ -133,25 +116,35 @@ def render_claim_form() -> None:
         return
 
     policy_labels = {
-        f"{p['policy_id']} - {p['policy_name']} (SI {_money(p['sum_insured'])})":
-        p["policy_id"]
-        for p in policies
+        (
+            f"{policy['policy_id']} - {policy['policy_name']} "
+            f"(SI {_money(policy['sum_insured'])})"
+        ): policy["policy_id"]
+        for policy in policies
     }
     chosen_policy = st.selectbox("Policy", list(policy_labels))
     policy_id = policy_labels[chosen_policy]
 
     with st.form("claim_form"):
         left, right = st.columns(2)
+
         with left:
             claim_amount = st.number_input(
-                "Claim amount (Rs)", min_value=1.0, value=50000.0, step=1000.0
+                "Claim amount (Rs)",
+                min_value=1.0,
+                value=50000.0,
+                step=1000.0,
             )
             treatment = st.text_input("Treatment / procedure", "Cataract Surgery")
             diagnosis = st.text_input("Diagnosis", "")
+
         with right:
             hospital = st.text_input("Hospital", "")
             treatment_date = st.date_input("Date of treatment", value=date.today())
-            claim_id = st.text_input("Claim ID", f"CLM-{uuid4().hex[:8].upper()}")
+            claim_id = st.text_input(
+                "Claim ID",
+                f"CLM-{uuid4().hex[:8].upper()}",
+            )
 
         notes = st.text_area("Notes for the file", "")
         submitted = st.form_submit_button("Analyze claim", type="primary")
@@ -173,13 +166,7 @@ def render_claim_form() -> None:
 
 
 def render_chat() -> None:
-    """A general Q&A box -- separate from the claim form above.
-
-    Not every question an employee has is "assess this claim" -- sometimes
-    it's just "what's this customer's remaining sum insured". This calls the
-    same agent that handles that, with memory: it remembers earlier turns in
-    this chat because every call reuses one chat_session_id.
-    """
+    """Render the customer-scoped policy and claims chat."""
     from src.agent import run_agent
 
     customers = _customers()
@@ -187,20 +174,30 @@ def render_chat() -> None:
         return
 
     st.subheader("Ask a question")
-    labels = {f"{c['customer_id']} - {c['name']}": c["customer_id"] for c in customers}
-    chosen = st.selectbox("About which customer?", list(labels), key="chat_customer")
+    labels = {
+        f"{customer['customer_id']} - {customer['name']}": customer["customer_id"]
+        for customer in customers
+    }
+    chosen = st.selectbox(
+        "About which customer?",
+        list(labels),
+        key="chat_customer",
+    )
     customer_id = labels[chosen]
 
     with st.form("chat_form", clear_on_submit=True):
         question = st.text_input(
-            "Question", placeholder="e.g. What is this customer's remaining sum insured?"
+            "Question",
+            placeholder="e.g. What is this customer's remaining sum insured?",
         )
         asked = st.form_submit_button("Ask")
 
     if asked and question.strip():
         with st.spinner("Thinking..."):
             result = run_agent(
-                question, st.session_state.chat_session_id, customer_id
+                question,
+                st.session_state.chat_session_id,
+                customer_id,
             )
         answer = result.get("error") or result.get("answer") or "No answer."
         st.session_state.chat_history.append((question, answer))
@@ -213,29 +210,26 @@ def render_chat() -> None:
 
 
 def render_breakdown(recommendation: dict) -> None:
-    """Show the deduction breakdown the engine produced."""
+    """Show claim amount, deductions, and recommended payable amount."""
     deductions = recommendation.get("deductions") or {}
     first, second, third = st.columns(3)
+
     first.metric("Bill amount", _money(recommendation.get("bill_amount")))
-    second.metric("Co-pay deducted", _money(deductions.get("copay_amount") or 0))
-    third.metric("Recommended payable", _money(recommendation.get("payable_amount")))
+    second.metric(
+        "Co-pay deducted",
+        _money(deductions.get("copay_amount") or 0),
+    )
+    third.metric(
+        "Recommended payable",
+        _money(recommendation.get("payable_amount")),
+    )
 
     if recommendation.get("reason_summary"):
         st.caption(f"Deciding check: {recommendation['reason_summary']}")
 
 
 def _fact_value(value) -> str:
-    """Render one fact's value as a single string.
-
-    A fact's value is a bool (coverage), a float (sub_limit, copay,
-    remaining sum insured), or None (not_applicable / unknown) depending on
-    which fact it is. Handing that mix straight to st.dataframe put all
-    three in one column; PyArrow inferred a boolean column from the
-    True/False rows, then failed converting the floats and "-" placeholders
-    into it. Streamlit caught the exception and silently coerced the table,
-    but every render was throwing a full traceback into the server log.
-    A single string type sidesteps the inference entirely.
-    """
+    """Convert a fact value to a display-safe string."""
     if value is None:
         return "-"
     if isinstance(value, bool):
@@ -246,12 +240,7 @@ def _fact_value(value) -> str:
 
 
 def render_facts(recommendation: dict) -> None:
-    """Show every policy fact the engine resolved, and how it resolved it.
-
-    This table is what separates a copilot from a black box: an employee can
-    see that the co-pay came from the policy records and the sub-limit from
-    the wording, and that nothing was assumed.
-    """
+    """Show policy facts resolved by the eligibility engine."""
     facts = recommendation.get("facts") or []
     if not facts:
         return
@@ -261,7 +250,10 @@ def render_facts(recommendation: dict) -> None:
         [
             {
                 "Fact": fact["name"].replace("_", " ").title(),
-                "Status": FACT_STATUS_DISPLAY.get(fact["status"], fact["status"]),
+                "Status": FACT_STATUS_DISPLAY.get(
+                    fact["status"],
+                    fact["status"],
+                ),
                 "Value": _fact_value(fact.get("value")),
                 "Source": fact.get("source", "-"),
                 "Detail": fact.get("detail", ""),
@@ -273,7 +265,7 @@ def render_facts(recommendation: dict) -> None:
 
 
 def render_missing(recommendation: dict) -> None:
-    """List what the employee has to chase before this claim can be decided."""
+    """Show information still needed before a decision can be made."""
     missing = recommendation.get("missing_information") or []
     if not missing:
         return
@@ -284,7 +276,7 @@ def render_missing(recommendation: dict) -> None:
 
 
 def render_evidence(recommendation: dict) -> None:
-    """List the cited policy clauses behind the recommendation."""
+    """Show the policy clauses supporting the recommendation."""
     evidence = recommendation.get("evidence") or []
     if not evidence:
         st.info("No policy clauses were retrieved for this claim.")
@@ -295,17 +287,21 @@ def render_evidence(recommendation: dict) -> None:
         uin = item.get("uin") or "-"
         page = item.get("page") or "-"
         insurer = item.get("insurer") or "-"
+
         with st.expander(f"[Source: {insurer}, UIN: {uin}, Page {page}]"):
             st.write(item.get("text") or "")
 
 
 def _save(decision: str, employee: str, **extra) -> None:
-    """Resume the paused graph with the employee's answer and record it."""
+    """Resume the paused workflow and save the employee decision."""
     from src.agent import submit_decision
 
     with st.spinner("Recording decision..."):
         result = submit_decision(
-            st.session_state.session_id, decision, employee, **extra
+            st.session_state.session_id,
+            decision,
+            employee,
+            **extra,
         )
 
     if result.get("error"):
@@ -318,15 +314,15 @@ def _save(decision: str, employee: str, **extra) -> None:
 
 
 def _render_actions(employee: str, recommendation: dict) -> None:
-    """Approve as-is, approve with edits, or reject the recommendation."""
+    """Render approve, edit, and reject actions."""
     approve, edit, reject = st.tabs(["Approve", "Edit", "Reject"])
     payable = recommendation.get("payable_amount")
 
     with approve:
         if recommendation.get("status") == "needs_more_info":
             st.info(
-                "The copilot could not establish everything this claim turns "
-                "on. Approving records that you decided anyway."
+                "The copilot could not establish every required fact. "
+                "Approving records that you decided anyway."
             )
         st.write("Record the recommendation exactly as it stands.")
         if st.button("Approve as recommended", type="primary"):
@@ -341,7 +337,12 @@ def _render_actions(employee: str, recommendation: dict) -> None:
         )
         edits = st.text_area("What you changed and why", key="edit_note")
         if st.button("Save edited decision"):
-            _save("edit", employee, payable_amount=amount, edits=edits)
+            _save(
+                "edit",
+                employee,
+                payable_amount=amount,
+                edits=edits,
+            )
 
     with reject:
         reason = st.text_area("Reason for rejecting", key="reject_note")
@@ -353,7 +354,7 @@ def _render_actions(employee: str, recommendation: dict) -> None:
 
 
 def render_review_panel(employee: str) -> None:
-    """The recommendation plus the three actions the employee can take."""
+    """Show the recommendation and employee decision controls."""
     review = st.session_state.review
     if not review:
         return
@@ -363,7 +364,8 @@ def render_review_panel(employee: str) -> None:
     st.subheader("Recommendation - awaiting your review")
 
     style, label = STATUS_DISPLAY.get(
-        recommendation.get("status"), ("info", "No recommendation")
+        recommendation.get("status"),
+        ("info", "No recommendation"),
     )
     getattr(st, style)(label)
 
@@ -379,7 +381,7 @@ def render_review_panel(employee: str) -> None:
 
 
 def render_audit_trail() -> None:
-    """Recent decisions, so the employee can see what has been recorded."""
+    """Show recent reviewed claim decisions."""
     from config import settings
     from src.decisions import DecisionStore
 
@@ -391,6 +393,7 @@ def render_audit_trail() -> None:
         f"{stats['total']} decisions recorded, "
         f"{stats['agreement_rate_percent']}% approved as recommended"
     )
+
     if not rows:
         st.info("No decisions recorded yet.")
         return
@@ -403,7 +406,8 @@ def render_audit_trail() -> None:
                 "Employee": row["employee_decision"],
                 "AI amount": row["ai_payable_amount"],
                 "Final amount": (
-                    row["employee_payable_amount"] or row["ai_payable_amount"]
+                    row["employee_payable_amount"]
+                    or row["ai_payable_amount"]
                 ),
                 "By": row["decided_by"],
             }
@@ -414,7 +418,7 @@ def render_audit_trail() -> None:
 
 
 def main() -> None:
-    """Draw the whole page: form on the left, audit trail in the sidebar."""
+    """Render the complete employee interface."""
     _init_state()
     st.title("Claims Copilot")
     st.caption(
