@@ -1,19 +1,6 @@
-"""Adapters for the existing dense and hosted sparse Pinecone indexes.
+"""Pinecone storage for dense and sparse policy-document indexes."""
+from __future__ import annotations
 
-WHY this is not langchain-pinecone's PineconeVectorStore: that class covers
-one dense index, and this project runs two indexes of different kinds. The
-sparse half is a Pinecone *hosted* sparse index -- created with
-create_index_for_model() and queried with search(inputs={"text": ...}), so
-Pinecone does the sparse encoding server-side. The official integration has
-no route to that API, so adopting it would mean dropping the lexical half of
-hybrid retrieval, or rebuilding a BM25 index in the API process on every
-boot and letting it drift from what was actually indexed.
-
-Everything above this layer *is* framework code: the two thin retrievers in
-src/retrieval/retrievers.py wrap these methods as LangChain BaseRetrievers,
-and EnsembleRetriever and CrossEncoderReranker take it from there. This
-module is only the part the framework does not reach.
-"""
 import logging
 from typing import Any
 
@@ -25,11 +12,6 @@ from .document_ids import document_id
 
 logger = logging.getLogger(__name__)
 
-# Pinecone rejects an upsert with a 5xx or a timeout often enough over a
-# multi-thousand-vector run that one failure should not lose the batch.
-# tenacity owns the backoff -- the hand-written sleep loop this replaced was
-# deleted in a refactor while its call sites stayed, which left the whole
-# indexing path raising NameError on the first upsert.
 _retry_upsert = retry(
     stop=stop_after_attempt(4),
     wait=wait_exponential(multiplier=2, min=2, max=30),
@@ -38,7 +20,7 @@ _retry_upsert = retry(
 
 
 class PineconeHybridStore:
-    """Read and write the dense and hosted sparse Pinecone indexes."""
+    """Read and write the project's dense and sparse Pinecone indexes."""
 
     def __init__(self, embedder) -> None:
         if not settings.pinecone_api_key:
@@ -52,7 +34,7 @@ class PineconeHybridStore:
         self.embedder = embedder
 
     def ensure_indexes(self) -> None:
-        """Create the dense and hosted sparse indexes if they don't exist."""
+        """Create the configured Pinecone indexes when missing."""
         from pinecone import ServerlessSpec
 
         existing = self.client.list_indexes().names()
@@ -85,11 +67,7 @@ class PineconeHybridStore:
         self.sparse_index = self.client.Index(settings.sparse_index_name)
 
     def index_documents(self, documents: list) -> None:
-        """Upsert matching document IDs into the two independent indexes.
-
-        embed_documents returns plain lists of floats (the LangChain
-        Embeddings contract), which is already what Pinecone's upsert wants.
-        """
+        """Embed documents and upsert matching IDs into both indexes."""
         texts = [document.page_content for document in documents]
         embeddings = self.embedder.embed_documents(texts)
 
@@ -137,6 +115,7 @@ class PineconeHybridStore:
         query: str,
         metadata_filter: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
+        """Run semantic search against the dense index."""
         embedding = self.embedder.embed_query(query)
         response = self.dense_index.query(
             vector=embedding,
@@ -159,6 +138,7 @@ class PineconeHybridStore:
         query: str,
         metadata_filter: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
+        """Run lexical search against the hosted sparse index."""
         response = self.sparse_index.search(
             namespace=settings.namespace,
             top_k=settings.sparse_top_k,
