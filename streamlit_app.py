@@ -391,7 +391,7 @@ def render_audit_trail() -> None:
 
     st.caption(
         f"{stats['total']} decisions recorded, "
-        f"{stats['agreement_rate_percent']}% approved as recommended"
+        f"{stats['agreement_rate_percent']}% matched the AI recommendation"
     )
 
     if not rows:
@@ -407,7 +407,8 @@ def render_audit_trail() -> None:
                 "AI amount": row["ai_payable_amount"],
                 "Final amount": (
                     row["employee_payable_amount"]
-                    or row["ai_payable_amount"]
+                    if row["employee_payable_amount"] is not None
+                    else row["ai_payable_amount"]
                 ),
                 "By": row["decided_by"],
             }
