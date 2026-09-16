@@ -52,7 +52,7 @@ METRICS = {
     "context_recall": context_recall,
 }
 
-TOPICS = [
+EVAL_TOPICS = [
     "waiting_period",
     "coverage",
     "exclusion",
@@ -94,14 +94,14 @@ def _model():
     )
 
 
-def _load_dataset() -> list[dict]:
+def load_dataset() -> list[dict]:
     return json.loads(DATASET_PATH.read_text(encoding="utf-8"))
 
 
 def _pick(entries: list[dict], per_topic: int) -> list[dict]:
     return [
         entry
-        for topic in TOPICS
+        for topic in EVAL_TOPICS
         for entry in [e for e in entries if e.get("topic") == topic][:per_topic]
     ]
 
@@ -250,7 +250,7 @@ def main() -> None:
     args = parser.parse_args()
 
     configure_logging()
-    entries = _pick(_load_dataset(), 1 if args.smoke else 2)
+    entries = _pick(load_dataset(), 1 if args.smoke else 2)
 
     print(f"Model: {settings.llm_model} (groq)")
     print(f"Running {len(entries)} questions")
