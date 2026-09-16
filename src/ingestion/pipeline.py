@@ -1,9 +1,4 @@
-"""Re-index every policy PDF: clean text to chunks, tables to their homes.
-
-WHY: this replaces the single-path Unstructured loader for the policy
-corpus. Each page is split into prose and tables first, so a chunk never
-contains stray table cells and a table never gets chopped into chunks.
-"""
+"""Parse policy PDFs into retrieval documents and structured table rows."""
 from __future__ import annotations
 
 import json
@@ -27,16 +22,9 @@ from .table_converter import table_to_rows, table_to_sentences
 
 logger = logging.getLogger(__name__)
 
-# Current IRDAI UIN format, e.g. SHAHLIP22027V032122 or BHAHLIP2014V011920.
 UIN_PATTERN = re.compile(r"\b[A-Z]{5,8}\d{4,5}V\d{6}\b")
-
-# Pre-2019 policies use a slash-separated UIN instead, for example
-# IRDAI/HLT/ABHI/P-H(G)/V.1/19/2016-17, IRDA/NL-HLT/NIA/P-H/V.I/35/14-15, or
-# IRDAII/HLT/OIC/P-H/V.II/450/15-16. The "IRDA" prefix spelling (0-2 trailing
-# I's) varies by insurer, so all three have to match.
 LEGACY_UIN_PATTERN = re.compile(r"\bIRDAI{0,2}/[A-Z0-9()./\-]{5,50}")
 
-# Insurer names as they appear on the first page of the policy wording.
 KNOWN_INSURERS = (
     "Star Health",
     "Aditya Birla Health",
@@ -59,7 +47,6 @@ KNOWN_INSURERS = (
     "Bajaj Allianz",
 )
 
-# Fallback: the first letters of a UIN identify the insurer.
 UIN_PREFIX_TO_INSURER = {
     "SHA": "Star Health",
     "ADI": "Aditya Birla Health",
@@ -75,9 +62,6 @@ UIN_PREFIX_TO_INSURER = {
     "ACK": "Acko General",
     "NIA": "New India Assurance",
     "OBI": "Oriental Insurance",
-    # These three printed their name in a logo image rather than as text, so
-    # the cover-page scan could not find them and every chunk was cited as
-    # "Unknown Insurer". The UIN prefix is the reliable fallback.
     "BAJ": "Bajaj Allianz",
     "CHI": "Cholamandalam",
     "NBH": "Niva Bupa",
@@ -85,12 +69,7 @@ UIN_PREFIX_TO_INSURER = {
 
 
 def extract_uin(pdf_name: str, sample_text: str) -> str:
-    """Find the policy UIN in the filename, then in the sampled page text.
-
-    Not every insurer puts the UIN on the cover page -- several print it
-    only in a page footer or on the schedule page, so the caller samples a
-    few pages rather than just the first one.
-    """
+    """Find a policy UIN in the filename or sampled PDF text."""
     match = UIN_PATTERN.search(pdf_name.upper())
     if match:
         return match.group(0)
@@ -101,19 +80,13 @@ def extract_uin(pdf_name: str, sample_text: str) -> str:
 
     match = LEGACY_UIN_PATTERN.search(sample_text.upper())
     if match:
-        # Trim any trailing separator or stray punctuation the regex swept up.
         return match.group(0).rstrip("./-)")
 
-    # No UIN printed anywhere. Returning the filename here used to look
-    # harmless, but it invented a UIN-shaped string ("25.SmartHealth Group
-    # Insurance - Policy") that the model then cited as if it were real,
-    # which is exactly what the citation rule exists to prevent. An empty
-    # string lets the caller skip the file instead.
     return ""
 
 
 def sample_pages_for_uin(pdf, page_limit: int = 4) -> str:
-    """Concatenate the first few pages plus the last, to hunt for a UIN."""
+    """Return text from early pages and the final page for UIN lookup."""
     indexes = list(range(min(page_limit, pdf.page_count)))
     if pdf.page_count and (pdf.page_count - 1) not in indexes:
         indexes.append(pdf.page_count - 1)
@@ -122,7 +95,7 @@ def sample_pages_for_uin(pdf, page_limit: int = 4) -> str:
 
 
 def extract_insurer(first_page_text: str, uin: str) -> str:
-    """Identify the insurer from the cover page, then from the UIN prefix."""
+    """Identify the insurer from page text or the UIN prefix."""
     lowered = first_page_text.lower()
     for insurer in KNOWN_INSURERS:
         if insurer.lower() in lowered:
@@ -132,7 +105,7 @@ def extract_insurer(first_page_text: str, uin: str) -> str:
 
 
 def extract_product(pdf_name: str) -> str:
-    """Use a tidied-up filename as the product name."""
+    """Create a readable product name from the PDF filename."""
     stem = Path(pdf_name).stem
     stem = re.sub(r"[_\-]+", " ", stem)
     stem = re.sub(r"\s+", " ", stem)
@@ -140,13 +113,12 @@ def extract_product(pdf_name: str) -> str:
 
 
 def _build_document(text: str, metadata: dict, pdf_name: str):
-    """Wrap a chunk in a LangChain Document the Pinecone store understands."""
+    """Create a LangChain document with stable source metadata."""
     from langchain_core.documents import Document
 
     full_metadata = {
         **metadata,
         "source": pdf_name,
-        # document_id() hashes these two, so they must stay populated.
         "page_number": metadata["page"],
         "category": metadata["chunk_type"],
     }
@@ -162,7 +134,7 @@ def _table_documents(
     page: int,
     pdf_name: str,
 ) -> list:
-    """Turn one table into citable Pinecone documents, one per row."""
+    """Convert one table into citable retrieval documents."""
     sentences = table_to_sentences(table, table_type, insurer, uin, page)
     metadata = {
         "uin": uin,
@@ -170,16 +142,13 @@ def _table_documents(
         "product": product,
         "page": page,
         "section": table_type,
-        # topic is the single label used in citations; topics is what the
-        # retrieval filter matches on. They are deliberately different
-        # vocabularies -- see TABLE_TYPE_TOPICS for why writing the table
-        # type into `topics` made whole tables unreachable.
         "topic": table_type,
         "topics": retrieval_topics(table_type),
         "chunk_type": "table_sentence",
     }
     return [
-        _build_document(sentence, metadata, pdf_name) for sentence in sentences
+        _build_document(sentence, metadata, pdf_name)
+        for sentence in sentences
     ]
 
 
@@ -190,8 +159,8 @@ def _send_to_pinecone(
     counters: dict,
     documents: list,
 ) -> None:
-    """Build Pinecone sentences from a table and append them to documents."""
-    table_docs = _table_documents(
+    """Append retrieval documents created from a table."""
+    table_documents = _table_documents(
         table,
         table_type,
         context["insurer"],
@@ -200,8 +169,8 @@ def _send_to_pinecone(
         context["page"],
         context["pdf_name"],
     )
-    documents.extend(table_docs)
-    counters["table_sentences"] += len(table_docs)
+    documents.extend(table_documents)
+    counters["table_sentences"] += len(table_documents)
 
 
 def _stage_for_sql(
@@ -211,7 +180,7 @@ def _stage_for_sql(
     counters: dict,
     staged_rows: list[dict],
 ) -> None:
-    """Convert a table to structured rows and append them to staged_rows."""
+    """Append structured rows created from a table."""
     rows = table_to_rows(table, table_type)
     for row in rows:
         staged_rows.append(
@@ -233,7 +202,7 @@ def _route_table(
     documents: list,
     staged_rows: list[dict],
 ) -> str | None:
-    """Classify one table and send it to Pinecone, SQL, both, or nowhere."""
+    """Classify a table and route it to retrieval, SQL staging, or both."""
     verdict = classify_table(table)
     table_type = verdict["table_type"]
     destination = verdict["destination"]
@@ -247,10 +216,22 @@ def _route_table(
         return None
 
     if destination in (SQL_AND_PINECONE, PINECONE_ONLY):
-        _send_to_pinecone(table, table_type, context, counters, documents)
+        _send_to_pinecone(
+            table,
+            table_type,
+            context,
+            counters,
+            documents,
+        )
 
     if destination in (SQL_AND_PINECONE, SQL_ONLY):
-        _stage_for_sql(table, table_type, context, counters, staged_rows)
+        _stage_for_sql(
+            table,
+            table_type,
+            context,
+            counters,
+            staged_rows,
+        )
 
     return f"{table_type}->{destination}"
 
@@ -262,11 +243,7 @@ def _process_one_page(
     documents: list,
     staged_rows: list[dict],
 ) -> list[str] | None:
-    """Chunk text from one page and route its tables, printing a progress line.
-
-    Returns the topic to carry into the next page, because exclusion lists
-    routinely run across a page break.
-    """
+    """Chunk page text and route any tables found on the page."""
     clean_text, tables = parse_page(page)
     page_number = context["page"]
 
@@ -278,13 +255,26 @@ def _process_one_page(
         page_number,
         context.get("carry_topics"),
     )
+
     for chunk in chunks:
-        documents.append(_build_document(chunk["text"], chunk["metadata"], context["pdf_name"]))
+        documents.append(
+            _build_document(
+                chunk["text"],
+                chunk["metadata"],
+                context["pdf_name"],
+            )
+        )
     counters["chunks"] += len(chunks)
 
     notes = []
     for table in tables:
-        note = _route_table(table, context, counters, documents, staged_rows)
+        note = _route_table(
+            table,
+            context,
+            counters,
+            documents,
+            staged_rows,
+        )
         if note:
             notes.append(note)
 
@@ -296,7 +286,7 @@ def _process_one_page(
 
 
 def process_pdf(pdf_path: Path, counters: dict) -> tuple[list, list[dict]]:
-    """Parse one PDF into Pinecone documents plus rows staged for SQL."""
+    """Parse one PDF into retrieval documents and structured rows."""
     import pymupdf
 
     documents: list = []
@@ -306,9 +296,6 @@ def process_pdf(pdf_path: Path, counters: dict) -> tuple[list, list[dict]]:
         first_page_text = pdf[0].get_text() if pdf.page_count else ""
         uin = extract_uin(pdf_path.name, sample_pages_for_uin(pdf))
 
-        # Every chunk is cited as [Source: insurer, UIN, Page]. Without a UIN
-        # nothing from this file could ever be quoted as fact, so indexing it
-        # would only add noise the retriever has to compete against.
         if not uin:
             print(f"\n  {pdf_path.name}")
             print("    SKIPPED: no UIN printed anywhere in this document")
@@ -333,7 +320,11 @@ def process_pdf(pdf_path: Path, counters: dict) -> tuple[list, list[dict]]:
                 "carry_topics": carry_topics,
             }
             carry_topics = _process_one_page(
-                pdf[page_index], context, counters, documents, staged_rows
+                pdf[page_index],
+                context,
+                counters,
+                documents,
+                staged_rows,
             )
 
     counters["pdfs"] += 1
@@ -341,7 +332,7 @@ def process_pdf(pdf_path: Path, counters: dict) -> tuple[list, list[dict]]:
 
 
 def new_counters() -> dict:
-    """Fresh tally for one indexing run."""
+    """Return counters for one indexing run."""
     return {
         "pdfs": 0,
         "chunks": 0,
@@ -353,7 +344,7 @@ def new_counters() -> dict:
 
 
 def save_staged_tables(staged_rows: list[dict]) -> Path:
-    """Write SQL-bound table rows to disk for the Prompt 2 database layer."""
+    """Write structured table rows to the artifacts folder."""
     settings.artifacts_dir.mkdir(parents=True, exist_ok=True)
     path = settings.artifacts_dir / "staged_tables.json"
     path.write_text(json.dumps(staged_rows, indent=2), encoding="utf-8")
@@ -361,7 +352,7 @@ def save_staged_tables(staged_rows: list[dict]) -> Path:
 
 
 def print_summary(counters: dict, staged_path: Path) -> None:
-    """Print the end-of-run tally so the user can see what happened."""
+    """Print a summary of the indexing run."""
     print("")
     print("=" * 60)
     print("INDEXING SUMMARY")
@@ -373,9 +364,14 @@ def print_summary(counters: dict, staged_path: Path) -> None:
     print(f"  Staged rows file    : {staged_path}")
     print(f"  Tables skipped      : {counters['tables_skipped']}")
     print("  Tables by type:")
-    ranked = sorted(counters["tables_by_type"].items(), key=lambda item: -item[1])
+
+    ranked = sorted(
+        counters["tables_by_type"].items(),
+        key=lambda item: -item[1],
+    )
     for table_type, count in ranked:
         print(f"    {table_type:<22} {count}")
+
     print("=" * 60)
 
 
@@ -383,9 +379,10 @@ def _collect_documents_from_pdfs(
     pdf_paths: list[Path],
     counters: dict,
 ) -> tuple[list, list[dict]]:
-    """Process every PDF, skipping failures, and collect all documents and rows."""
+    """Process all PDFs and collect successful outputs."""
     all_documents: list = []
     all_staged_rows: list[dict] = []
+
     for pdf_path in pdf_paths:
         try:
             documents, staged_rows = process_pdf(pdf_path, counters)
@@ -393,13 +390,15 @@ def _collect_documents_from_pdfs(
             logger.exception("pdf_failed path=%s", pdf_path)
             print(f"    -- failed, skipping {pdf_path.name}")
             continue
+
         all_documents.extend(documents)
         all_staged_rows.extend(staged_rows)
+
     return all_documents, all_staged_rows
 
 
 def run_pipeline(push_to_pinecone: bool = True) -> dict:
-    """Parse every PDF, then upsert the resulting documents into Pinecone."""
+    """Process all policy PDFs and optionally index the documents."""
     pdf_paths = sorted(settings.data_dir.glob("*.pdf"))
     if not pdf_paths:
         raise RuntimeError(f"No PDFs found in {settings.data_dir}")
@@ -407,19 +406,22 @@ def run_pipeline(push_to_pinecone: bool = True) -> dict:
     print(f"Found {len(pdf_paths)} PDFs in {settings.data_dir}")
     counters = new_counters()
 
-    all_documents, all_staged_rows = _collect_documents_from_pdfs(pdf_paths, counters)
-    staged_path = save_staged_tables(all_staged_rows)
+    documents, staged_rows = _collect_documents_from_pdfs(
+        pdf_paths,
+        counters,
+    )
+    staged_path = save_staged_tables(staged_rows)
 
-    if push_to_pinecone and all_documents:
-        print(f"\nEmbedding and upserting {len(all_documents)} documents...")
+    if push_to_pinecone and documents:
+        print(f"\nEmbedding and upserting {len(documents)} documents...")
         from src.embeddings import get_embedder
         from src.vectorstores import PineconeHybridStore
 
         store = PineconeHybridStore(get_embedder())
         store.ensure_indexes()
-        store.index_documents(all_documents)
+        store.index_documents(documents)
         print("Upsert complete.")
 
     print_summary(counters, staged_path)
-    counters["documents"] = len(all_documents)
+    counters["documents"] = len(documents)
     return counters
