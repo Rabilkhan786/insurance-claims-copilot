@@ -36,8 +36,8 @@ class Evidence(BaseModel):
 
     @property
     def is_citable(self) -> bool:
-        """Return True when the evidence has the required citation fields."""
-        return bool(self.uin and self.insurer and self.page is not None)
+        """Return True when the evidence has a UIN and page number."""
+        return bool(self.uin and self.page)
 
     def citation(self) -> str:
         """Return the standard policy citation string."""
