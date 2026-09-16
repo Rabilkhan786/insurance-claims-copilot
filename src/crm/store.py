@@ -1,22 +1,17 @@
-"""SQLite-backed CRM store: customers, policies and claims."""
+"""SQLite store for customers, policies, and claims."""
 from __future__ import annotations
-
-import logging
 
 from src.utils.sqlite_store import SqliteStore
 
 from .models import SCHEMA
 
-logger = logging.getLogger(__name__)
-
 
 class CRMStore(SqliteStore):
-    """Thin CRUD layer over the CRM SQLite database."""
+    """Read and write CRM records used by the copilot."""
 
     SCHEMA = SCHEMA
     LABEL = "crm"
 
-    # -- customers ---------------------------------------------------
     def add_customer(
         self,
         customer_id: str,
@@ -43,19 +38,13 @@ class CRMStore(SqliteStore):
         return dict(row) if row else None
 
     def list_customers(self) -> list[dict]:
-        """Every customer, for the claim form's picker.
-
-        Here rather than in the UI because the UI was opening its own sqlite3
-        connection and writing its own SELECT -- a second, silent copy of this
-        table's shape that would not have moved if the schema did.
-        """
+        """Return customer IDs and names for the UI picker."""
         with self._connect() as connection:
             rows = connection.execute(
                 "SELECT customer_id, name FROM customers ORDER BY customer_id"
             ).fetchall()
         return [dict(row) for row in rows]
 
-    # -- policies ------------------------------------------------------
     def add_policy(
         self,
         policy_id: str,
@@ -105,7 +94,6 @@ class CRMStore(SqliteStore):
             ).fetchone()
         return dict(row) if row else None
 
-    # -- claims --------------------------------------------------------
     def add_claim(
         self,
         claim_id: str,
@@ -144,6 +132,7 @@ class CRMStore(SqliteStore):
     ) -> list[dict]:
         query = "SELECT * FROM claims WHERE customer_id = ?"
         params: list[str] = [customer_id]
+
         if policy_id:
             query += " AND policy_id = ?"
             params.append(policy_id)
@@ -155,14 +144,9 @@ class CRMStore(SqliteStore):
     def get_claim_status(self, claim_id: str) -> dict | None:
         with self._connect() as connection:
             row = connection.execute(
-                # rejection_reason and eligible_amount are the two things a
-                # customer actually asks about, so a status lookup must carry
-                # them -- without them the agent can say "rejected" but never
-                # why, or "approved" but not for how much.
                 "SELECT claim_id, policy_id, claim_type, status, claim_amount, "
                 "eligible_amount, claim_date, rejection_reason "
                 "FROM claims WHERE claim_id = ?",
                 (claim_id,),
             ).fetchone()
         return dict(row) if row else None
-
