@@ -164,7 +164,8 @@ CLAIMS = [
         "eligible_amount": None,
         "rejection_reason": (
             "Maternity waiting period not complete. Policy started "
-            "2026-05-16; cover begins 2028-05-16."
+            "2026-05-16; the maternity waiting period is 24 months, so "
+            "cover begins 2028-05-16."
         ),
     },
     # Previous approved claims leave Rs 80,000 remaining
@@ -211,7 +212,8 @@ CLAIMS = [
         "status": "rejected",
         "eligible_amount": None,
         "rejection_reason": (
-            "Cosmetic surgery is excluded unless required after an accident."
+            "Cosmetic surgery is excluded under this policy unless "
+            "necessitated by an accident requiring hospitalisation."
         ),
     },
 ]
@@ -295,6 +297,7 @@ COPAYMENTS = [
     },
 ]
 
+# Demo schedule value for the top-up plan; the policy wording does not set one amount.
 DEDUCTIBLES = [
     {
         "policy_uin": "IRDA/NL-HLT/NIA/P-H/V.I/35/14-15",
