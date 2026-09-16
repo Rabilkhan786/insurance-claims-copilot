@@ -7,11 +7,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from config import settings  # noqa: E402
-from src.crm import CRMStore  # noqa: E402
-from src.decisions import DecisionStore  # noqa: E402
-from src.policy_data import PolicyDataStore  # noqa: E402
-
+from config import settings  
+from src.crm import CRMStore  
+from src.decisions import DecisionStore  
+from src.policy_data import PolicyDataStore  
 
 # ---------------------------------------------------------------------------
 # CRM demo data
