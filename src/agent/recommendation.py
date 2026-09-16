@@ -34,6 +34,15 @@ class Evidence(BaseModel):
     insurer: str | None = None
     page: int | None = None
 
+    @property
+    def is_citable(self) -> bool:
+        """Return True when the evidence has the required citation fields."""
+        return bool(self.uin and self.insurer and self.page is not None)
+
+    def citation(self) -> str:
+        """Return the standard policy citation string."""
+        return f"[Source: {self.insurer}, UIN: {self.uin}, Page {self.page}]"
+
 
 class PolicyFactView(BaseModel):
     """One policy fact resolved by the eligibility engine."""
