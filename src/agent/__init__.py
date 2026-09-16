@@ -1,6 +1,6 @@
 """Public agent and workflow functions."""
 from .agent import Context
-from .recommendation import ClaimRecommendation
+from .recommendation import ClaimRecommendation, Evidence
 from .workflow import (
     reset_session,
     run_agent,
@@ -12,6 +12,7 @@ from .workflow import (
 __all__ = [
     "ClaimRecommendation",
     "Context",
+    "Evidence",
     "reset_session",
     "run_agent",
     "run_claim_review",
