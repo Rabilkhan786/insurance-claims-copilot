@@ -1,43 +1,22 @@
-"""Populate every SQLite table with realistic demo data.
-
-Run it with:  uv run python Data/seed.py
-
-Five customers are hand-designed to cover the scenarios the eligibility
-engine has to handle correctly:
-
-    CUST001  happy path                  -- claim well within cover
-    CUST002  waiting period not complete -- maternity claimed too early
-    CUST003  sum insured nearly exhausted -- most of the cover already used
-    CUST004  exclusion + deductible      -- top-up plan, cosmetic claim
-    CUST005  lapsed policy               -- expired before the treatment date
-             + unindexed policy          -- on file, wording never loaded
-
-These are the ground truth behind evaluation/claims_dataset.json, so a change
-here has to be reflected there.
-
-Their policies reference REAL UINs pulled from the PDFs in
-Data/insurance_documents/, and the policy_data facts below (sub-limits,
-waiting periods, co-payments, deductibles) are transcribed from those same
-PDFs rather than invented, so a citation like "UIN SHAHLIP22027V032122,
-page 8" is honest.
-"""
+"""Seed the demo SQLite database with CRM and policy data."""
 from __future__ import annotations
 
 import sys
 from pathlib import Path
 
-# Allow running this file directly, not just as a module.
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from config import settings  # noqa: E402
-from src.decisions import DecisionStore  # noqa: E402
 from src.crm import CRMStore  # noqa: E402
+from src.decisions import DecisionStore  # noqa: E402
 from src.policy_data import PolicyDataStore  # noqa: E402
 
+
 # ---------------------------------------------------------------------------
-# CRM: customers, policies and claims
+# CRM demo data
 # ---------------------------------------------------------------------------
+
 CUSTOMERS = [
     {
         "customer_id": "CUST001",
@@ -82,9 +61,8 @@ CUSTOMERS = [
 ]
 
 POLICIES = [
+    # Happy path
     {
-        # HAPPY PATH -- Star Health Arogya Sanjeevani, 24-hour hospitalisation
-        # claim well inside cover.
         "policy_id": "POL001",
         "customer_id": "CUST001",
         "policy_number": "SHAHLIP22027V032122",
@@ -96,10 +74,8 @@ POLICIES = [
         "end_date": "2026-08-31",
         "status": "active",
     },
+    # Waiting period
     {
-        # WAITING PERIOD NOT COMPLETE -- Oriental Happy Family Floater,
-        # started 3 months ago. Real maternity waiting period is 24 months
-        # (see policy_data seed below), so this claim is far too early.
         "policy_id": "POL002",
         "customer_id": "CUST002",
         "policy_number": "IRDAII/HLT/OIC/P-H/V.II/450/15-16",
@@ -111,9 +87,8 @@ POLICIES = [
         "end_date": "2027-05-15",
         "status": "active",
     },
+    # Nearly exhausted sum insured
     {
-        # SUM INSURED NEARLY EXHAUSTED -- Star Health Senior Citizens Red
-        # Carpet, three approved claims already used most of the cover.
         "policy_id": "POL003",
         "customer_id": "CUST003",
         "policy_number": "SHAHLIP25027V072425",
@@ -125,9 +100,8 @@ POLICIES = [
         "end_date": "2026-08-31",
         "status": "active",
     },
+    # Exclusion and deductible
     {
-        # REJECTED CLAIM -- New India Top-Up Mediclaim, claim for a
-        # cosmetic procedure that is explicitly excluded.
         "policy_id": "POL004",
         "customer_id": "CUST004",
         "policy_number": "IRDA/NL-HLT/NIA/P-H/V.I/35/14-15",
@@ -139,10 +113,8 @@ POLICIES = [
         "end_date": "2026-10-31",
         "status": "active",
     },
+    # Expired policy
     {
-        # LAPSED POLICY -- same Star Health product as CUST001, but this one
-        # expired and was not renewed. Nothing after step 2 of the checklist
-        # should ever run for a claim on it, whatever the treatment is.
         "policy_id": "POL005",
         "customer_id": "CUST005",
         "policy_number": "SHAHLIP22027V032122",
@@ -154,12 +126,8 @@ POLICIES = [
         "end_date": "2025-05-31",
         "status": "expired",
     },
+    # Policy exists in CRM but its wording is not indexed in RAG
     {
-        # WORDING NOT INDEXED -- a real operational case, not a broken row.
-        # The policy is on file in the CRM, but nobody ever loaded its PDF, so
-        # this UIN retrieves nothing. Every claim on it must come back as
-        # needs_more_info: with no clause to read, "no exclusion was found" is
-        # not a reason to pay, and it is not a reason to reject either.
         "policy_id": "POL006",
         "customer_id": "CUST005",
         "policy_number": "NOTINDEXED0000V000000",
@@ -200,8 +168,7 @@ CLAIMS = [
             "cover begins 2028-05-16."
         ),
     },
-    # Three approved claims this policy year, adding up to Rs 9,20,000 of
-    # the Rs 10,00,000 sum insured -- Rs 80,000 remains.
+    # Previous approved claims leave Rs 80,000 remaining
     {
         "claim_id": "CLM003",
         "customer_id": "CUST003",
@@ -251,8 +218,9 @@ CLAIMS = [
     },
 ]
 
+
 def seed_crm(store: CRMStore) -> dict[str, int]:
-    """Insert customers, policies and claims."""
+    """Insert demo customers, policies, and claims."""
     for customer in CUSTOMERS:
         store.add_customer(**customer)
     for policy in POLICIES:
@@ -268,8 +236,9 @@ def seed_crm(store: CRMStore) -> dict[str, int]:
 
 
 # ---------------------------------------------------------------------------
-# Policy data: facts transcribed from the real PDFs for our 4 demo UINs.
+# Structured policy facts
 # ---------------------------------------------------------------------------
+
 SUB_LIMITS = [
     {
         "policy_uin": "SHAHLIP22027V032122",
@@ -328,10 +297,7 @@ COPAYMENTS = [
     },
 ]
 
-# Top-up plans pay only above a deductible. The New India Top-Up wording does
-# not fix a single figure -- the amount is selected on the policy schedule --
-# so this is a DEMO value representing one of the standard options, not a
-# number extracted from the PDF.
+# Demo schedule value for the top-up plan; the policy wording does not set one amount.
 DEDUCTIBLES = [
     {
         "policy_uin": "IRDA/NL-HLT/NIA/P-H/V.I/35/14-15",
@@ -341,8 +307,9 @@ DEDUCTIBLES = [
     },
 ]
 
+
 def seed_policy_data(store: PolicyDataStore) -> dict[str, int]:
-    """Insert sub-limits, waiting periods, co-pays, room rent, and lookups."""
+    """Insert structured policy rules used by the eligibility engine."""
     for row in SUB_LIMITS:
         store.add_sub_limit(**row)
     for row in WAITING_PERIODS:
@@ -352,32 +319,32 @@ def seed_policy_data(store: PolicyDataStore) -> dict[str, int]:
     for row in DEDUCTIBLES:
         store.add_deductible(**row)
 
-
     return {
         "policy_sub_limits": len(SUB_LIMITS),
         "policy_waiting_periods": len(WAITING_PERIODS),
         "policy_copayments": len(COPAYMENTS),
+        "policy_deductibles": len(DEDUCTIBLES),
     }
 
 
 def main() -> None:
-    """Wipe and rebuild every SQLite database with fresh demo data."""
+    """Rebuild the demo SQLite database."""
     settings.crm_db_path.unlink(missing_ok=True)
 
-    crm_counts = seed_crm(CRMStore(settings.crm_db_path))
-    # DecisionStore shares the CRM database so claim_decisions.claim_id
-    # sits alongside the claims it audits.
+    crm_store = CRMStore(settings.crm_db_path)
+    policy_store = PolicyDataStore(settings.crm_db_path)
+
+    counts = {
+        **seed_crm(crm_store),
+        **seed_policy_data(policy_store),
+    }
+
+    # Creates the audit table used for employee decisions.
     DecisionStore(settings.crm_db_path)
-    policy_counts = seed_policy_data(PolicyDataStore(settings.crm_db_path))
 
-    all_counts = {**crm_counts, **policy_counts}
-    table_count = len(all_counts)
-    row_count = sum(all_counts.values())
-
-    print(f"created {row_count} rows in {table_count} tables")
-    for table, count in all_counts.items():
-        print(f"  {table:<24} {count}")
-
+    print(f"Created {sum(counts.values())} demo records.")
+    for table, count in counts.items():
+        print(f"{table:<24} {count}")
 
 
 if __name__ == "__main__":

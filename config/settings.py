@@ -1,28 +1,18 @@
-"""Single validated configuration entry point for the application."""
+"""Load application settings from YAML and environment variables."""
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import yaml
 from dotenv import load_dotenv
 
 
-REQUIRED_SECTIONS = (
-    "project",
-    "models",
-    "pinecone",
-    "retrieval",
-    "chunking",
-    "api",
-    "table_extraction",
-)
-
-
 @dataclass(frozen=True)
 class Settings:
+    """Application configuration used across the project."""
+
     root_dir: Path
     data_dir: Path
     artifacts_dir: Path
@@ -59,122 +49,73 @@ class Settings:
     groq_api_key: str | None
 
 
-def _required(mapping: dict[str, Any], key: str) -> Any:
-    """Return mapping[key] or raise a clear error if it is missing."""
-    if key not in mapping:
-        raise ValueError(f"Missing configuration value: {key}")
-    return mapping[key]
-
-
-def _load_yaml_config(root: Path) -> dict[str, Any]:
-    """Read config.yaml and confirm every required section is present."""
-    config_path = root / "config" / "config.yaml"
-    with config_path.open(encoding="utf-8") as file:
-        raw = yaml.safe_load(file) or {}
-    for section in REQUIRED_SECTIONS:
-        _required(raw, section)
-    return raw
-
-
-def _project_kwargs(root: Path, project: dict) -> dict:
-    """Build Settings fields for root/data/artifact paths."""
-    return {
-        "root_dir": root,
-        "data_dir": root / project["data_dir"],
-        "artifacts_dir": root / project["artifacts_dir"],
-    }
-
-
-def _model_kwargs(models: dict) -> dict:
-    """Build Settings fields for embedding, reranker, and LLM model names."""
-    return {
-        "embedding_model": models["embedding"],
-        "cross_encoder_model": models["cross_encoder"],
-        "llm_model": models["llm"],
-        "llm_temperature": float(models["temperature"]),
-    }
-
-
-def _pinecone_kwargs(pinecone: dict) -> dict:
-    """Build Settings fields for Pinecone index configuration."""
-    return {
-        "dense_index_name": pinecone["dense_index"],
-        "sparse_index_name": pinecone["sparse_index"],
-        "namespace": pinecone["namespace"],
-        "pinecone_cloud": pinecone["cloud"],
-        "pinecone_region": pinecone["region"],
-        "dense_dimension": int(pinecone["dense_dimension"]),
-        "dense_metric": pinecone["dense_metric"],
-        "sparse_model": pinecone["sparse_model"],
-    }
-
-
-def _retrieval_kwargs(retrieval: dict) -> dict:
-    """Build Settings fields for hybrid retrieval top-k and RRF parameters."""
-    return {
-        "dense_top_k": int(retrieval["dense_top_k"]),
-        "sparse_top_k": int(retrieval["sparse_top_k"]),
-        "final_top_k": int(retrieval["final_top_k"]),
-        "rrf_k": int(retrieval["rrf_k"]),
-    }
-
-
-def _chunking_kwargs(chunking: dict) -> dict:
-    """Build Settings fields for text chunking strategy and size limits."""
-    return {
-        "chunk_strategy": chunking["strategy"],
-        "max_chunk_size": int(chunking["max_chunk_size"]),
-        "min_chunk_size": int(chunking["min_chunk_size"]),
-        "tag_topics": bool(chunking["tag_topics"]),
-        "chunk_skip_patterns": tuple(chunking["skip_patterns"]),
-    }
-
-
-def _table_kwargs(table_extraction: dict) -> dict:
-    """Build Settings fields for PDF table extraction rules."""
-    return {
-        "table_extraction_enabled": bool(table_extraction["enabled"]),
-        "table_min_rows": int(table_extraction["min_rows"]),
-        "table_min_cols": int(table_extraction["min_cols"]),
-    }
-
-
-def _infra_kwargs(root: Path, raw: dict) -> dict:
-    """Build Settings fields for the API server and database paths."""
-    api = raw["api"]
-    database = raw.get("database", {})
-    cache = raw.get("cache", {})
-    return {
-        "api_host": api["host"],
-        "api_port": int(api["port"]),
-        "batch_size": int(raw["batch_size"]),
-        "rag_cache_ttl_seconds": int(cache.get("rag_ttl_seconds", 3600)),
-        "crm_db_path": root / database.get("crm_path", "data/crm.db"),
-    }
-
-
-def _secret_kwargs() -> dict:
-    """Build Settings fields for API keys, read from the environment only."""
-    return {
-        "pinecone_api_key": os.getenv("PINECONE_API_KEY"),
-        "groq_api_key": os.getenv("GROQ_API_KEY"),
-    }
-
-
 def load_settings() -> Settings:
-    """Load env vars and config.yaml into a validated Settings object."""
+    """Read config.yaml and build the project settings object."""
     root = Path(__file__).resolve().parents[1]
     load_dotenv(root / ".env")
-    raw = _load_yaml_config(root)
+
+    config_path = root / "config" / "config.yaml"
+    with config_path.open(encoding="utf-8") as file:
+        config = yaml.safe_load(file) or {}
+
+    required_sections = (
+        "project",
+        "models",
+        "pinecone",
+        "retrieval",
+        "chunking",
+        "api",
+        "table_extraction",
+    )
+    missing = [name for name in required_sections if name not in config]
+    if missing:
+        raise ValueError(f"Missing config sections: {', '.join(missing)}")
+
+    project = config["project"]
+    models = config["models"]
+    pinecone = config["pinecone"]
+    retrieval = config["retrieval"]
+    chunking = config["chunking"]
+    api = config["api"]
+    table_extraction = config["table_extraction"]
+    database = config.get("database", {})
+    cache = config.get("cache", {})
+
     return Settings(
-        **_project_kwargs(root, raw["project"]),
-        **_model_kwargs(raw["models"]),
-        **_pinecone_kwargs(raw["pinecone"]),
-        **_retrieval_kwargs(raw["retrieval"]),
-        **_chunking_kwargs(raw["chunking"]),
-        **_table_kwargs(raw["table_extraction"]),
-        **_infra_kwargs(root, raw),
-        **_secret_kwargs(),
+        root_dir=root,
+        data_dir=root / project["data_dir"],
+        artifacts_dir=root / project["artifacts_dir"],
+        embedding_model=models["embedding"],
+        cross_encoder_model=models["cross_encoder"],
+        llm_model=models["llm"],
+        llm_temperature=float(models["temperature"]),
+        dense_index_name=pinecone["dense_index"],
+        sparse_index_name=pinecone["sparse_index"],
+        namespace=pinecone["namespace"],
+        pinecone_cloud=pinecone["cloud"],
+        pinecone_region=pinecone["region"],
+        dense_dimension=int(pinecone["dense_dimension"]),
+        dense_metric=pinecone["dense_metric"],
+        sparse_model=pinecone["sparse_model"],
+        dense_top_k=int(retrieval["dense_top_k"]),
+        sparse_top_k=int(retrieval["sparse_top_k"]),
+        final_top_k=int(retrieval["final_top_k"]),
+        rrf_k=int(retrieval["rrf_k"]),
+        api_host=api["host"],
+        api_port=int(api["port"]),
+        batch_size=int(config["batch_size"]),
+        rag_cache_ttl_seconds=int(cache.get("rag_ttl_seconds", 3600)),
+        crm_db_path=root / database.get("crm_path", "data/crm.db"),
+        chunk_strategy=chunking["strategy"],
+        max_chunk_size=int(chunking["max_chunk_size"]),
+        min_chunk_size=int(chunking["min_chunk_size"]),
+        tag_topics=bool(chunking["tag_topics"]),
+        chunk_skip_patterns=tuple(chunking["skip_patterns"]),
+        table_extraction_enabled=bool(table_extraction["enabled"]),
+        table_min_rows=int(table_extraction["min_rows"]),
+        table_min_cols=int(table_extraction["min_cols"]),
+        pinecone_api_key=os.getenv("PINECONE_API_KEY"),
+        groq_api_key=os.getenv("GROQ_API_KEY"),
     )
 
 

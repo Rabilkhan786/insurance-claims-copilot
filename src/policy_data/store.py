@@ -1,31 +1,37 @@
-"""SQLite-backed store for structured policy facts.
-
-The eligibility engine reads everything here by policy UIN, so every
-lookup takes a UIN and returns exact rows -- no similarity search.
-"""
+"""SQLite store for structured policy rules."""
 from __future__ import annotations
-
-import logging
 
 from src.utils.sqlite_store import SqliteStore
 
 from .models import SCHEMA
 
-logger = logging.getLogger(__name__)
 
-# Words that appear in almost every treatment name, so they identify nothing
-# on their own. Mirrors the list in src/eligibility/engine.py, which applies
-# the same idea to clause text rather than to table rows.
 GENERIC_TREATMENT_WORDS = {
-    "surgery", "surgeries", "surgical", "treatment", "treatments",
-    "procedure", "procedures", "therapy", "expenses", "medical",
-    "hospitalization", "hospitalisation", "care", "inpatient",
-    "outpatient", "patient", "admission", "hospital", "other", "major",
+    "surgery",
+    "surgeries",
+    "surgical",
+    "treatment",
+    "treatments",
+    "procedure",
+    "procedures",
+    "therapy",
+    "expenses",
+    "medical",
+    "hospitalization",
+    "hospitalisation",
+    "care",
+    "inpatient",
+    "outpatient",
+    "patient",
+    "admission",
+    "hospital",
+    "other",
+    "major",
 }
 
 
 def _identifying_words(name: str) -> set[str]:
-    """Return only the words in a treatment name that actually identify it."""
+    """Return meaningful words from a treatment name."""
     cleaned = (name or "").lower().replace("_", " ").replace("-", " ")
     return {
         word
@@ -35,12 +41,11 @@ def _identifying_words(name: str) -> set[str]:
 
 
 class PolicyDataStore(SqliteStore):
-    """Thin CRUD layer over the policy fact tables."""
+    """Read and write structured policy facts."""
 
     SCHEMA = SCHEMA
     LABEL = "policy_data"
 
-    # -- sub-limits ------------------------------------------------------
     def add_sub_limit(
         self,
         policy_uin: str,
@@ -67,36 +72,28 @@ class PolicyDataStore(SqliteStore):
         return [dict(row) for row in rows]
 
     def find_sub_limit(self, policy_uin: str, treatment: str) -> dict | None:
-        """Look up one treatment's sub-limit by name.
-
-        WHY not a plain LIKE: wrapping the query in wildcards only matches when
-        the STORED name is the longer string, so a bill reading "Cataract
-        Surgery" silently missed the stored "Cataract" row and the 40,000 cap
-        was never applied. Matching runs in both directions instead.
-
-        Only identifying words count. Matching on a generic word such as
-        "surgery" alone would make a cataract bill hit every surgical row.
-        """
+        """Return the best matching sub-limit for a treatment."""
         query_words = _identifying_words(treatment)
         if not query_words:
             return None
 
         best_row = None
         best_overlap = 0
+
         for row in self.get_sub_limits(policy_uin):
             stored_words = _identifying_words(row["treatment"])
             if not stored_words:
                 continue
-            # Either name may be the more specific one.
             if not (stored_words <= query_words or query_words <= stored_words):
                 continue
+
             overlap = len(stored_words & query_words)
             if overlap > best_overlap:
-                best_row, best_overlap = row, overlap
+                best_row = row
+                best_overlap = overlap
 
         return best_row
 
-    # -- deductibles ------------------------------------------------------
     def add_deductible(
         self,
         policy_uin: str,
@@ -113,11 +110,6 @@ class PolicyDataStore(SqliteStore):
             )
 
     def find_deductible(self, policy_uin: str) -> dict | None:
-        """Return the deductible for a top-up policy, or None if it has none.
-
-        Only top-up and super top-up plans carry one; an ordinary indemnity
-        policy has no row here and pays from the first rupee.
-        """
         with self._connect() as connection:
             row = connection.execute(
                 "SELECT * FROM policy_deductibles WHERE policy_uin = ?",
@@ -125,7 +117,6 @@ class PolicyDataStore(SqliteStore):
             ).fetchone()
         return dict(row) if row else None
 
-    # -- waiting periods --------------------------------------------------
     def add_waiting_period(
         self,
         policy_uin: str,
@@ -139,7 +130,7 @@ class PolicyDataStore(SqliteStore):
             connection.execute(
                 "INSERT INTO policy_waiting_periods "
                 "(policy_uin, insurer, condition, waiting_period_months, "
-                " waiting_period_type, page) VALUES (?, ?, ?, ?, ?, ?)",
+                "waiting_period_type, page) VALUES (?, ?, ?, ?, ?, ?)",
                 (
                     policy_uin,
                     insurer,
@@ -167,7 +158,6 @@ class PolicyDataStore(SqliteStore):
             ).fetchone()
         return dict(row) if row else None
 
-    # -- co-payments -------------------------------------------------------
     def add_copayment(
         self,
         policy_uin: str,
@@ -182,7 +172,7 @@ class PolicyDataStore(SqliteStore):
             connection.execute(
                 "INSERT INTO policy_copayments "
                 "(policy_uin, insurer, condition, copay_percent, age_min, "
-                " age_max, page) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "age_max, page) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
                     policy_uin,
                     insurer,
@@ -194,10 +184,15 @@ class PolicyDataStore(SqliteStore):
                 ),
             )
 
-    def get_copayments(self, policy_uin: str, age: int | None = None) -> list[dict]:
-        """Return co-pay rules, narrowed to an age band when age is given."""
+    def get_copayments(
+        self,
+        policy_uin: str,
+        age: int | None = None,
+    ) -> list[dict]:
+        """Return co-pay rows, optionally filtered by age."""
         query = "SELECT * FROM policy_copayments WHERE policy_uin = ?"
         params: list = [policy_uin]
+
         if age is not None:
             query += (
                 " AND (age_min IS NULL OR age_min <= ?)"

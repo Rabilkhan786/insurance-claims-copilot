@@ -1,14 +1,4 @@
-"""Decide what to do with each table found in a policy PDF.
-
-WHY: not every table is worth indexing. An ombudsman office address list is
-pure noise in a vector index, while a sub-limit table is exactly what a
-customer question needs. This module sorts tables into four destinations:
-
-    skip               -- throw it away
-    sql_and_pinecone   -- rows into SQLite, sentences into Pinecone
-    sql_only           -- rows into SQLite (too long/tabular to embed well)
-    pinecone_only      -- sentences into Pinecone (no clean row structure)
-"""
+"""Classify policy tables and choose where each table should be stored."""
 from __future__ import annotations
 
 import logging
@@ -16,20 +6,16 @@ import re
 
 logger = logging.getLogger(__name__)
 
-# Rupee figures and percentages -- their absence marks a table as a bare
-# item list rather than a limits or rates table.
 AMOUNT_PATTERN = re.compile(
-    r"(rs\.?\s*\d|inr\s*\d|\d+\s*%|\d{1,3}(,\d{2,3})+|\d{4,})", re.I
+    r"(rs\.?\s*\d|inr\s*\d|\d+\s*%|\d{1,3}(,\d{2,3})+|\d{4,})",
+    re.I,
 )
 
-# --- destinations ------------------------------------------------------
 SKIP = "skip"
 SQL_AND_PINECONE = "sql_and_pinecone"
 SQL_ONLY = "sql_only"
 PINECONE_ONLY = "pinecone_only"
 
-# --- junk: contact directories and non-payable item lists ----------------
-# These are checked first -- an ombudsman table may still mention "limit".
 SKIP_KEYWORDS = (
     "ombudsman",
     "bimalokpal",
@@ -46,30 +32,14 @@ SKIP_KEYWORDS = (
     "usgi coins",
     "fitness assessment",
     "active dayz",
-    # grievance / contact directories
     "first point of contact",
     "grievance redressal",
     "grievance officer",
-    # non-payable item lists, which run for pages under many headings
     "non-payable",
     "non payable",
     "list of non",
 )
 
-# --- tables that give us both structured rows and good sentences ---------
-# Each entry is (keyword, weight); a table's score for a type is the sum of
-# the weights that matched.
-#
-# WHY scoring rather than first-match-wins: this used to be a plain dict
-# checked in insertion order, with sub_limit first and "cataract"/"hernia"
-# among its keywords. A waiting-period table that lists ailments -- and they
-# all list cataract and hernia -- matched sub_limit before its own
-# "waiting period" keyword was ever reached, so the rows were staged under
-# the wrong type and their "1 year" landed where a rupee amount belonged.
-#
-# Naming a disease is weak evidence (weight 1): every kind of table in these
-# policies mentions the same diseases. Naming the mechanism -- "sub-limit",
-# "waiting period", "co-payment" -- is what actually identifies the table.
 SQL_AND_PINECONE_KEYWORDS = {
     "waiting_period": (
         ("waiting period", 6),
@@ -116,13 +86,8 @@ SQL_AND_PINECONE_KEYWORDS = {
     ),
 }
 
-# A type needs this much evidence to win. Below it the table falls through to
-# the SQL-only and Pinecone-only checks, and finally to "unknown" -- which is
-# the honest answer, and far better than staging rows under a type whose
-# columns mean something else.
 MIN_TABLE_SCORE = 3
 
-# --- lookup tables: far too many rows to embed, perfect for SQL ----------
 SQL_ONLY_KEYWORDS = {
     "premium_rate": ("si/age", "age band", "21-35 yrs", "36-45 yrs"),
     "day_care_procedure": (
@@ -132,7 +97,6 @@ SQL_ONLY_KEYWORDS = {
     ),
 }
 
-# --- prose-shaped tables: no clean row structure, but useful text --------
 PINECONE_ONLY_KEYWORDS = {
     "cancellation_refund": (
         "period on risk",
@@ -142,35 +106,30 @@ PINECONE_ONLY_KEYWORDS = {
         "risk is retained",
         "% of premium",
     ),
-    "entry_age": ("minimum entry age", "maximum entry age", "entry age"),
-    "restoration": ("restoration amount", "restoration of sum insured"),
-    "pinecone_only": ("zone a/b", "prescribed time limit", "grace period"),
+    "entry_age": (
+        "minimum entry age",
+        "maximum entry age",
+        "entry age",
+    ),
+    "restoration": (
+        "restoration amount",
+        "restoration of sum insured",
+    ),
+    "pinecone_only": (
+        "zone a/b",
+        "prescribed time limit",
+        "grace period",
+    ),
 }
 
-# --- table type -> the topics retrieval actually filters on --------------
-# WHY this map exists: a table type names the SHAPE of the table found in the
-# PDF ("modern_treatment", "room_rent"). The RAG tools filter on the topic
-# vocabulary the chunker uses for prose ("coverage", "sub_limit",
-# "exclusion", "waiting_period", "copay"). Those two vocabularies are not the
-# same, and the pipeline used to write the table type straight into `topics`.
-#
-# The result was silent and expensive: a "Robotic surgeries ... covered up to
-# Rs X" row was indexed under topics=["modern_treatment"], while
-# check_coverage searches topics $in ["coverage", "sub_limit", "copay"]. The
-# row was in Pinecone, correct and citable, and no tool could ever return it.
-# Every table type below therefore has to name topics a tool actually asks
-# for, or the rows it produces are write-only.
 TABLE_TYPE_TOPICS = {
     "waiting_period": ["waiting_period"],
-    # A sub-limit row states both that something is covered and what caps it.
     "sub_limit": ["sub_limit", "coverage"],
     "copayment": ["copay"],
     "room_rent": ["sub_limit"],
     "plan_comparison": ["coverage"],
     "accidental_payout": ["coverage"],
     "modern_treatment": ["coverage"],
-    # Restoration/refill tops the sum insured back up, so it changes what is
-    # payable on a later claim -- a coverage fact, not an administrative one.
     "restoration": ["coverage"],
     "cancellation_refund": ["claim_procedure"],
     "entry_age": ["definition"],
@@ -179,17 +138,12 @@ TABLE_TYPE_TOPICS = {
 
 
 def retrieval_topics(table_type: str) -> list[str]:
-    """Return the topics a table's rows should be indexed under.
-
-    Falls back to "general" for an unmapped type: that keeps the chunk
-    searchable without a filter, and matches what the chunker does with prose
-    it cannot classify.
-    """
+    """Return retrieval topics for a classified table."""
     return TABLE_TYPE_TOPICS.get(table_type, ["general"])
 
 
 def table_to_text(table: dict) -> str:
-    """Flatten every cell in a table into one lowercase string for matching."""
+    """Flatten table cells into lowercase text for classification."""
     parts = []
     for row in table.get("rows", []):
         for cell in row:
@@ -199,17 +153,21 @@ def table_to_text(table: dict) -> str:
 
 
 def _matches_any(haystack: str, keywords: tuple[str, ...]) -> bool:
-    """Return True if any keyword appears in the flattened table text."""
+    """Return True when any keyword appears in the table text."""
     return any(keyword in haystack for keyword in keywords)
 
 
 def _score_type(haystack: str, weighted_keywords: tuple) -> int:
-    """Add up the weights of every keyword present in the table text."""
-    return sum(weight for keyword, weight in weighted_keywords if keyword in haystack)
+    """Return a weighted score for one table type."""
+    return sum(
+        weight
+        for keyword, weight in weighted_keywords
+        if keyword in haystack
+    )
 
 
 def _best_scoring_type(haystack: str) -> tuple[str, int]:
-    """Return the highest-scoring table type and its score."""
+    """Return the highest-scoring structured table type."""
     scores = {
         table_type: _score_type(haystack, keywords)
         for table_type, keywords in SQL_AND_PINECONE_KEYWORDS.items()
@@ -219,19 +177,16 @@ def _best_scoring_type(haystack: str) -> tuple[str, int]:
 
 
 def _is_hospital_network(table: dict) -> bool:
-    """A hospital list is identified by its columns, not by its content."""
-    header = " ".join(str(cell or "") for cell in table.get("header", [])).lower()
+    """Detect a hospital network from its column names."""
+    header = " ".join(
+        str(cell or "")
+        for cell in table.get("header", [])
+    ).lower()
     return "hospital name" in header and "address" in header
 
 
 def _is_numbered_item_list(table: dict) -> bool:
-    """Detect a bare "1. item / 2. item" list with no amounts attached.
-
-    Insurers publish their non-payable items this way, spread over several
-    pages under a dozen different headings, so keyword matching alone keeps
-    missing them. The shape is the reliable signal: a serial number column
-    and item names, with no rupee figure or percentage anywhere in sight.
-    """
+    """Detect numbered item lists that contain no amounts or percentages."""
     rows = table.get("rows", [])
     if len(rows) < 3:
         return False
@@ -242,45 +197,51 @@ def _is_numbered_item_list(table: dict) -> bool:
         if first.isdigit():
             numbered += 1
 
-    # Most rows must start with a serial number...
     if numbered < len(rows) * 0.7:
         return False
 
-    # ...and the table must quote no money and no percentages.
-    text = table_to_text(table)
-    return not AMOUNT_PATTERN.search(text)
+    return not AMOUNT_PATTERN.search(table_to_text(table))
 
 
 def classify_table(table: dict) -> dict:
-    """Return {'table_type', 'destination'} for one extracted table."""
+    """Return a table type and storage destination."""
     text = table_to_text(table)
 
-    # 1. Junk goes first so it can never be rescued by a later keyword match.
     if _matches_any(text, SKIP_KEYWORDS):
         return {"table_type": "junk", "destination": SKIP}
 
-    # 2. Hospital networks are column-shaped, so check them before keywords.
     if _is_hospital_network(table):
-        return {"table_type": "hospital_network", "destination": SQL_ONLY}
+        return {
+            "table_type": "hospital_network",
+            "destination": SQL_ONLY,
+        }
 
     best_type, best_score = _best_scoring_type(text)
     if best_score >= MIN_TABLE_SCORE:
-        return {"table_type": best_type, "destination": SQL_AND_PINECONE}
+        return {
+            "table_type": best_type,
+            "destination": SQL_AND_PINECONE,
+        }
 
     for table_type, keywords in SQL_ONLY_KEYWORDS.items():
         if _matches_any(text, keywords):
-            return {"table_type": table_type, "destination": SQL_ONLY}
+            return {
+                "table_type": table_type,
+                "destination": SQL_ONLY,
+            }
 
     for table_type, keywords in PINECONE_ONLY_KEYWORDS.items():
         if _matches_any(text, keywords):
-            return {"table_type": table_type, "destination": PINECONE_ONLY}
+            return {
+                "table_type": table_type,
+                "destination": PINECONE_ONLY,
+            }
 
-    # 3. Checked after the named types so a numbered day-care procedure
-    #    list still reaches SQL instead of being thrown away here.
     if _is_numbered_item_list(table):
-        return {"table_type": "non_payable_list", "destination": SKIP}
+        return {
+            "table_type": "non_payable_list",
+            "destination": SKIP,
+        }
 
-    # 4. Anything we cannot name is skipped, but logged so we can improve
-    #    the keyword lists later.
     logger.warning("unknown_table_type preview=%s", text[:120])
     return {"table_type": "unknown", "destination": SKIP}

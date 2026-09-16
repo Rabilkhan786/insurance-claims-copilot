@@ -1,10 +1,4 @@
-"""Turn classified table rows into natural-language sentences for Pinecone.
-
-WHY: an embedding model cannot make sense of a bare row like
-``["Cataract", "Rs 25,000"]``. Rewritten as a full sentence that names the
-insurer, the UIN and the page, the same row becomes a retrievable fact with
-a citation baked in.
-"""
+"""Convert extracted policy tables into text and structured rows."""
 from __future__ import annotations
 
 import logging
@@ -12,14 +6,9 @@ import re
 
 logger = logging.getLogger(__name__)
 
-# "i", "(ii)", "3.", "12)" -- a serial number, never a column name.
 ROW_INDEX_PATTERN = re.compile(r"^\(?(?:[ivxlc]+|\d{1,3})\)?[.)]?$", re.I)
-
-# Cell values that mean "this cell is empty" once a PDF has been parsed.
 EMPTY_VALUES = {"", "nan", "none", "null", "-", "--", "n/a", "na"}
 
-# One template per table type. {subject} is the first column, {value} the
-# second, {extra} the third when the table has one.
 TEMPLATES = {
     "sub_limit": (
         "Under {insurer} (UIN: {uin}, page {page}), {subject} has a "
@@ -57,14 +46,14 @@ GENERIC_TEMPLATE = (
 
 
 def _clean_cell(cell) -> str:
-    """Normalise one cell into a single-line string."""
+    """Convert a table cell to a clean single-line string."""
     if cell is None:
         return ""
     return " ".join(str(cell).split())
 
 
 def _is_empty(value: str) -> bool:
-    """Return True when a cell holds no usable information."""
+    """Return True when a cell has no useful value."""
     return value.strip().lower() in EMPTY_VALUES
 
 
@@ -75,7 +64,7 @@ def row_to_sentence(
     uin: str,
     page: int,
 ) -> str | None:
-    """Render one table row as a sentence, or None if the row is empty."""
+    """Convert one table row into a retrievable sentence."""
     cells = [_clean_cell(cell) for cell in row]
     if len(cells) < 2:
         return None
@@ -83,13 +72,10 @@ def row_to_sentence(
     subject, value = cells[0], cells[1]
     extra = cells[2] if len(cells) > 2 else ""
 
-    # A row with no subject or no value tells the reader nothing.
     if _is_empty(subject) or _is_empty(value):
         return None
 
     template = TEMPLATES.get(table_type, GENERIC_TEMPLATE)
-
-    # plan_comparison is the one template that needs a third column.
     if table_type == "plan_comparison" and _is_empty(extra):
         template = GENERIC_TEMPLATE
 
@@ -110,13 +96,13 @@ def table_to_sentences(
     uin: str,
     page: int,
 ) -> list[str]:
-    """Convert every data row of a table into a citable sentence."""
+    """Convert table data rows into citable sentences."""
     rows = table.get("rows", [])
     if len(rows) < 2:
         return []
 
     sentences = []
-    for row in rows[1:]:  # row 0 is the header
+    for row in rows[1:]:
         sentence = row_to_sentence(row, table_type, insurer, uin, page)
         if sentence:
             sentences.append(sentence)
@@ -131,28 +117,22 @@ def table_to_sentences(
 
 
 def table_to_rows(table: dict, table_type: str) -> list[dict]:
-    """Return the table's data rows keyed by header, for SQL storage.
-
-    Prompt 2 owns the actual SQL tables -- this just hands over clean,
-    header-labelled rows so nothing has to re-parse the PDF later.
-    """
+    """Convert table data into header-labelled structured rows."""
     rows = table.get("rows", [])
     if len(rows) < 2:
         return []
 
-    first = [_clean_cell(cell) for cell in rows[0]]
+    first_row = [_clean_cell(cell) for cell in rows[0]]
 
-    # A table split across two pages carries its header only on the first
-    # page, so the continuation starts on a data row -- "vi", "3.", "(ii)".
-    # Using that as the header produced columns named after a serial number
-    # and a paragraph of policy text, and silently swallowed the row itself.
-    # Positional names are honest about the column being unknown, and the
-    # row survives as data.
-    if first and ROW_INDEX_PATTERN.match(first[0]):
-        header = [f"col_{index}" for index in range(len(first))]
+    # A continuation table may start with a numbered data row instead of a header.
+    if first_row and ROW_INDEX_PATTERN.match(first_row[0]):
+        header = [f"col_{index}" for index in range(len(first_row))]
         data_rows = rows
     else:
-        header = [cell or f"col_{index}" for index, cell in enumerate(first)]
+        header = [
+            cell or f"col_{index}"
+            for index, cell in enumerate(first_row)
+        ]
         data_rows = rows[1:]
 
     records = []
@@ -160,7 +140,9 @@ def table_to_rows(table: dict, table_type: str) -> list[dict]:
         cells = [_clean_cell(cell) for cell in row]
         if all(_is_empty(cell) for cell in cells):
             continue
+
         record = dict(zip(header, cells))
         record["table_type"] = table_type
         records.append(record)
+
     return records

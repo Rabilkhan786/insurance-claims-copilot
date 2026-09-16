@@ -1,89 +1,165 @@
 # AI Health Insurance Claims Copilot
 
-An internal copilot for claims employees assessing health insurance claims.
+A portfolio project that helps a health-insurance claims employee review a claim using customer records, policy documents, deterministic calculations, and an AI explanation.
 
-The employee enters claim details. The system loads the customer's policy and claim history from SQLite, retrieves supporting clauses from policy PDFs with hybrid RAG, runs a deterministic eligibility and payable-amount check, and produces a recommendation with citations. The employee then approves, edits, or rejects the recommendation.
+The AI does **not** make the final claim decision. It produces a recommendation, and the employee can approve, edit, or reject it.
 
-The AI does not make the final claim decision. The recommendation and the employee's decision are both stored for audit.
+## Problem
 
-## Architecture
+A claims employee may need to check several things before deciding a health-insurance claim:
+
+- Is the policy active?
+- Does the policy belong to this customer?
+- Is the treatment covered?
+- Is the treatment excluded?
+- Is a waiting period still active?
+- Is there a treatment sub-limit?
+- Is there a co-payment or deductible?
+- How much sum insured is still available?
+
+The information is split between customer records and long policy PDFs. This project brings those checks into one workflow.
+
+## Project flow
 
 ```text
-Claim
-  ↓
-SQLite: customer, policy, claim history
-  ↓
-Hybrid RAG: policy clauses + citations
-  ↓
+Employee enters a claim
+        ↓
+SQLite CRM
+Customer + policy + previous claims
+        ↓
+Hybrid RAG
+Relevant policy clauses + citations
+        ↓
 Deterministic eligibility engine
-  ↓
-LangChain agent: explanation and tool use
-  ↓
+Eligibility + payable amount
+        ↓
+LLM explanation
+Clear recommendation with evidence
+        ↓
 LangGraph human review
-  ↓
-Audit: AI recommendation + employee decision
+Approve / Edit / Reject
+        ↓
+SQLite audit trail
+AI recommendation + employee decision
 ```
 
-### Core design
+## How a claim is reviewed
 
-| Component | Responsibility |
-|---|---|
-| SQLite | Customer, policy, claim history, and curated policy facts |
-| Pinecone hybrid RAG | Policy wording, coverage, exclusions, definitions, and citations |
-| Eligibility engine | Eligibility checks and payable-amount calculation |
-| LangChain | Agent and tool calling |
-| LangGraph | Stateful workflow, checkpointing, and human review |
-| FastAPI | JSON API |
-| Streamlit | Employee interface |
-| pytest | Deterministic claim-correctness tests |
-| RAGAS | Retrieval evaluation |
-
-The eligibility engine returns three states: `eligible`, `ineligible`, and `needs_more_info`. Policy facts are tracked as `found`, `not_applicable`, or `unknown`, so missing evidence does not silently become a default value.
+1. The employee selects a customer and policy and enters the claim details.
+2. The application loads customer, policy, and previous-claim data from SQLite.
+3. Relevant policy clauses are retrieved from Pinecone using dense and sparse search.
+4. The deterministic eligibility engine checks policy validity, coverage, exclusions, waiting periods, sub-limits, co-payments, deductibles, and remaining sum insured.
+5. Python calculates the payable amount. The LLM does not calculate insurance money values.
+6. The LLM explains the engine result using the retrieved policy evidence.
+7. LangGraph pauses the workflow so the employee can approve, edit, or reject the recommendation.
+8. The AI recommendation and employee decision are stored for audit.
 
 ## Claim calculation
 
-For eligible claims, the deterministic engine applies policy rules in this order:
+For an eligible claim, deductions are applied in this order:
 
 ```text
-sub-limit
-  ↓
-co-pay
-  ↓
-deductible
-  ↓
-remaining sum insured
+Claim amount
+    ↓
+Sub-limit
+    ↓
+Co-payment
+    ↓
+Deductible
+    ↓
+Remaining sum insured
+    ↓
+Payable amount
 ```
 
-Money and date calculations are handled by Python logic rather than the LLM.
+Keeping this calculation in normal Python makes the result predictable and testable.
 
-## Tech stack
+## Eligibility results
 
-| Layer | Technology |
+The engine returns one of three states:
+
+- `eligible` — required checks passed and a payable amount can be calculated.
+- `ineligible` — a definite rule blocks the claim, such as an exclusion or expired policy.
+- `needs_more_info` — an important policy fact could not be established safely.
+
+Policy facts are also tracked as `found`, `not_applicable`, or `unknown`. This prevents missing information from silently becoming a default value.
+
+## Main components
+
+| Component | Purpose |
 |---|---|
-| Language | Python 3.11 |
-| Package manager | uv |
-| Agent | LangChain `create_agent` |
-| Orchestration | LangGraph `StateGraph`, `interrupt()` |
-| LLM | Groq `openai/gpt-oss-120b` |
-| Vector database | Pinecone |
-| Embeddings | `BAAI/bge-base-en-v1.5` |
-| Reranker | `BAAI/bge-reranker-base` |
-| Database | SQLite |
-| PDF parsing | PyMuPDF |
-| API | FastAPI |
-| UI | Streamlit |
-| Evaluation | pytest + RAGAS |
+| SQLite | Stores demo customers, policies, previous claims, policy facts, and reviewed decisions |
+| Pinecone | Stores policy-document chunks for retrieval |
+| BGE embeddings | Dense semantic retrieval |
+| Pinecone sparse index | Keyword/lexical retrieval |
+| Cross-encoder reranker | Reranks dense + sparse retrieval results |
+| Eligibility engine | Runs deterministic insurance checks and calculations |
+| LangChain tools | Give the agent controlled access to CRM, RAG, and calculation functions |
+| LangGraph | Manages claim-review state and human approval |
+| FastAPI | JSON API |
+| Streamlit | Employee-facing demo interface |
+| pytest | Tests deterministic logic and workflow behaviour |
+| RAGAS | Optional RAG evaluation |
+
+## Project structure
+
+```text
+insurance-claims-copilot/
+├── app.py                  # FastAPI API
+├── streamlit_app.py        # Employee UI
+├── main.py                 # Policy PDF indexing entry point
+├── config/
+│   ├── config.yaml         # Non-secret configuration
+│   └── settings.py         # Loads YAML + environment variables
+├── Data/
+│   ├── insurance_documents/ # Source policy PDFs
+│   └── seed.py              # Creates demo SQLite data
+├── src/
+│   ├── agent/              # LLM agent, recommendation model, LangGraph workflow
+│   ├── crm/                # Customer, policy, and claim database access
+│   ├── decisions/          # Human-review audit trail
+│   ├── eligibility/        # Deterministic claim checks
+│   ├── tools/              # CRM, RAG, and calculation tools
+│   ├── ingestion/          # PDF parsing, chunking, and table handling
+│   ├── retrieval/          # Hybrid retrieval and reranking
+│   ├── embeddings/         # BGE embedding model
+│   ├── vectorstores/       # Pinecone dense/sparse storage
+│   ├── policy_data/        # Structured policy-rule storage
+│   ├── cache/              # Retrieval cache
+│   └── utils/              # Shared SQLite and logging helpers
+├── evaluation/             # Claim and RAG evaluation datasets
+└── tests/                  # Automated tests
+```
+
+`Data/` contains source/demo assets committed to the project. Lowercase `data/` is created at runtime for SQLite database files and is ignored by Git.
+
+## Demo data
+
+`Data/seed.py` creates a small synthetic dataset for predictable demonstrations and tests. The demo cases cover:
+
+- a normal covered claim,
+- an incomplete waiting period,
+- a nearly exhausted sum insured,
+- an excluded treatment,
+- an expired policy,
+- and a policy whose wording is not available to RAG.
+
+Run:
+
+```bash
+uv run python Data/seed.py
+```
 
 ## Setup
 
-Requirements: Python 3.11 and [uv](https://docs.astral.sh/uv/).
+Requirements: Python 3.11 and `uv`.
 
 ```bash
 uv sync
 cp .env.example .env
 ```
 
-Set the required environment variables:
+Add the required keys to `.env`:
 
 ```text
 GROQ_API_KEY=
@@ -96,9 +172,21 @@ Seed the demo database:
 uv run python Data/seed.py
 ```
 
+Index the policy PDFs:
+
+```bash
+uv run python main.py
+```
+
+Use `--reset` when the indexed document set or chunking rules have changed:
+
+```bash
+uv run python main.py --reset
+```
+
 ## Run the application
 
-Streamlit employee UI:
+Streamlit UI:
 
 ```bash
 uv run streamlit run streamlit_app.py
@@ -110,129 +198,55 @@ FastAPI:
 uv run uvicorn app:app --port 8000
 ```
 
-### API endpoints
+Main API endpoints:
 
 | Method | Endpoint | Purpose |
 |---|---|---|
-| GET | `/health` | Health/readiness check |
-| POST | `/review-claim` | Assess a claim and pause for employee review |
+| GET | `/health` | Check API and retrieval readiness |
+| POST | `/review-claim` | Analyse a claim and pause for employee review |
 | POST | `/submit-decision` | Save the employee decision and resume the workflow |
-| POST | `/chat` | Ask policy questions; supports streaming |
-| POST | `/reset-memory` | Clear a conversation thread |
-
-## Index policy PDFs
-
-Add or rebuild the Pinecone index with:
-
-```bash
-uv run python main.py
-uv run python main.py --reset
-```
-
-`--reset` clears the namespace before indexing. Use it after changing chunking or topic-tagging rules, or when documents have been removed from the corpus.
+| POST | `/chat` | Ask customer-scoped policy and claim questions |
+| POST | `/reset-memory` | Clear one chat session |
 
 ## Testing
 
-Run the full test suite:
+Run the test suite:
 
 ```bash
 uv run pytest
 ```
 
-Run the claim-correctness benchmark:
-
-```bash
-uv run pytest tests/test_claims_evaluation.py -v
-```
-
-The claim dataset contains 15 labelled cases covering sub-limits, co-pays, deductibles, waiting periods, exclusions, exhausted sum insured, lapsed policies, customer/policy mismatch, and `needs_more_info` cases.
+The claim evaluation dataset includes cases for policy validity, waiting periods, exclusions, sub-limits, co-payments, deductibles, remaining sum insured, ownership checks, and missing information.
 
 ## RAG evaluation
 
-Install the optional evaluation dependencies:
+RAGAS is optional and kept separate from the application dependencies.
 
 ```bash
 uv sync --extra evaluation
-```
-
-Run the evaluation:
-
-```bash
-uv run python evaluation/run_ragas.py
-```
-
-Smoke run:
-
-```bash
 uv run python evaluation/run_ragas.py --smoke
 ```
 
-The evaluation measures faithfulness, answer relevancy, context precision, and context recall. The baseline results are stored in `evaluation/baseline_results.json`.
+The evaluation tracks faithfulness, answer relevancy, context precision, and context recall.
 
-## Project structure
+## Important design decisions
 
-```text
-insurance-claims-copilot/
-├── app.py
-├── streamlit_app.py
-├── main.py
-├── config/
-│   ├── config.yaml
-│   └── settings.py
-├── Data/
-│   ├── insurance_documents/
-│   ├── excluded_documents/
-│   └── seed.py
-├── src/
-│   ├── agent/
-│   │   ├── agent.py
-│   │   ├── workflow.py
-│   │   └── recommendation.py
-│   ├── eligibility/
-│   │   ├── engine.py
-│   │   ├── facts.py
-│   │   └── parsing.py
-│   ├── tools/
-│   │   ├── crm_tools.py
-│   │   ├── rag_tools.py
-│   │   └── calc_tools.py
-│   ├── ingestion/
-│   │   ├── page_parser.py
-│   │   ├── table_classifier.py
-│   │   ├── table_converter.py
-│   │   ├── chunker.py
-│   │   └── pipeline.py
-│   ├── retrieval/
-│   │   └── retrievers.py
-│   ├── embeddings/
-│   │   └── bge.py
-│   ├── vectorstores/
-│   │   └── pinecone_store.py
-│   ├── cache/
-│   │   └── rag_cache.py
-│   ├── crm/
-│   ├── policy_data/
-│   ├── decisions/
-│   └── utils/
-├── evaluation/
-│   ├── claims_dataset.json
-│   ├── rag_dataset.json
-│   ├── run_ragas.py
-│   └── baseline_results.json
-└── tests/
-```
+**Why not let the LLM calculate claim amounts?**  
+Insurance calculations should be deterministic. Python applies the policy rules; the LLM only explains the result.
+
+**Why use SQLite and RAG together?**  
+SQLite is used for exact structured facts such as customer records, previous claims, and curated policy values. RAG is used for policy wording that needs semantic retrieval and citations.
+
+**Why keep a human review step?**  
+The copilot is decision support. The employee remains responsible for the final claim decision, and both the recommendation and final decision are saved.
 
 ## Limitations
 
-This repository is a portfolio/demo system rather than a production insurance platform.
+This is a portfolio/demo system, not a production insurance platform.
 
-- Demo customers and policies are seeded locally.
-- The policy corpus does not cover every possible insurance document or clause.
-- Some policy facts depend on the available curated data or retrieved wording; unresolved facts return `needs_more_info`.
-- Some retrieval cases, especially long natural-language queries and exclusion clauses, still need improvement.
-- The API is not configured with production authentication or authorization.
-- The project does not provide legal, regulatory, or insurer-approved claim decisions.
-
-## License
-
-This repository is intended for demonstration and portfolio use.
+- Customer and claim records are synthetic demo data.
+- The policy corpus does not represent every insurer or policy clause.
+- Some claims correctly return `needs_more_info` when evidence is unavailable.
+- Retrieval quality can still vary for long or unusual policy wording.
+- Production authentication, authorization, monitoring, and regulatory controls are not implemented.
+- The project does not provide legal or insurer-approved claim decisions.

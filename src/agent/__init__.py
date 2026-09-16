@@ -1,7 +1,4 @@
-"""Public exports for the agent subpackage.
-
-Layer 1 lives in agent.py (create_agent), Layer 2 in workflow.py (StateGraph).
-"""
+"""Public agent and workflow functions."""
 from .agent import Context
 from .recommendation import ClaimRecommendation, Evidence
 from .workflow import (

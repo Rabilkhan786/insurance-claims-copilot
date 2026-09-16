@@ -1,42 +1,35 @@
+# Python
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
 *.py[cod]
+.pytest_cache/
+.pytest_tmp/
+.ruff_cache/
 
+# Environment and secrets
 .env
 .env.*
 !.env.example
 
-venv/
+# Virtual environments
 .venv/
+venv/
 
-.pytest_cache/
-.pytest_tmp/
+# Runtime files
 artifacts/
 data/*.db
-
-.DS_Store
-.idea/
-.vscode/
-
-/test*.py
-*.log
-
-.CLAUDE.md
-
-.claude
-CLAUDE.md
-BUILD_PLAN.md
-
-# SQLite temp files
 *.db-shm
 *.db-wal
+*.log
 
-# Notebooks (optional for production)
-notebooks/
-
+# Local tooling
+.vscode/
+.idea/
 .claude/
-
 CLAUDE.md
-BUILD.md
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Optional local notebooks
+notebooks/
