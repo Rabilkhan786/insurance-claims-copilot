@@ -1,4 +1,4 @@
-"""SQLite-backed audit trail for AI recommendations and employee decisions."""
+"""SQLite store for human-reviewed claim decisions."""
 from __future__ import annotations
 
 import json
@@ -17,13 +17,13 @@ AI_DECISIONS = ("approve", "reject", "needs_more_info")
 
 
 def _ai_decision_from(recommendation: dict) -> str:
-    """Read the AI recommendation status."""
+    """Return a valid AI decision status."""
     status = recommendation.get("status")
     return status if status in AI_DECISIONS else "needs_more_info"
 
 
 class DecisionStore(SqliteStore):
-    """Thin CRUD layer over the claim_decisions audit table."""
+    """Read and write the claim decision audit trail."""
 
     SCHEMA = SCHEMA
     LABEL = "decisions"
@@ -41,7 +41,7 @@ class DecisionStore(SqliteStore):
         override_reason: str | None = None,
         notes: str | None = None,
     ) -> str:
-        """Save one reviewed recommendation and return its decision_id."""
+        """Save the AI recommendation and employee decision."""
         if employee_decision not in EMPLOYEE_DECISIONS:
             raise ValueError(f"employee_decision must be one of {EMPLOYEE_DECISIONS}")
 
@@ -52,47 +52,6 @@ class DecisionStore(SqliteStore):
         )
         decision_id = str(uuid4())
 
-        self._insert(
-            decision_id,
-            claim_id,
-            customer_id,
-            policy_id,
-            ai_decision,
-            recommendation,
-            employee_decision,
-            employee_payable_amount,
-            employee_edits,
-            override_reason,
-            agreed,
-            decided_by,
-            notes,
-        )
-        logger.info(
-            "decision_recorded claim_id=%s ai=%s employee=%s agreed=%s",
-            claim_id,
-            ai_decision,
-            employee_decision,
-            bool(agreed),
-        )
-        return decision_id
-
-    def _insert(
-        self,
-        decision_id,
-        claim_id,
-        customer_id,
-        policy_id,
-        ai_decision,
-        recommendation,
-        employee_decision,
-        employee_payable_amount,
-        employee_edits,
-        override_reason,
-        agreed,
-        decided_by,
-        notes,
-    ) -> None:
-        """Write the audit row."""
         with self._connect() as connection:
             connection.execute(
                 "INSERT INTO claim_decisions ("
@@ -119,8 +78,17 @@ class DecisionStore(SqliteStore):
                 ),
             )
 
+        logger.info(
+            "decision_recorded claim_id=%s ai=%s employee=%s agreed=%s",
+            claim_id,
+            ai_decision,
+            employee_decision,
+            bool(agreed),
+        )
+        return decision_id
+
     def get(self, decision_id: str) -> dict | None:
-        """Read one decision back, parsing the recommendation JSON."""
+        """Return one saved decision."""
         with self._connect() as connection:
             row = connection.execute(
                 "SELECT * FROM claim_decisions WHERE decision_id = ?",
@@ -129,7 +97,7 @@ class DecisionStore(SqliteStore):
         return self._to_dict(row)
 
     def recent(self, limit: int = 20) -> list[dict]:
-        """Return the latest decisions."""
+        """Return the latest employee decisions."""
         with self._connect() as connection:
             rows = connection.execute(
                 "SELECT * FROM claim_decisions ORDER BY decided_at DESC LIMIT ?",
@@ -138,7 +106,7 @@ class DecisionStore(SqliteStore):
         return [self._to_dict(row) for row in rows]
 
     def agreement_rate(self) -> dict:
-        """Return the percentage of human decisions matching the AI call."""
+        """Return how often employees approved the AI recommendation as-is."""
         with self._connect() as connection:
             row = connection.execute(
                 "SELECT COUNT(*) AS total, SUM(agreed) AS agreed FROM claim_decisions"
@@ -147,12 +115,17 @@ class DecisionStore(SqliteStore):
         total = row["total"] or 0
         agreed = row["agreed"] or 0
         rate = round(100 * agreed / total, 1) if total else 0.0
-        return {"total": total, "agreed": agreed, "agreement_rate_percent": rate}
+        return {
+            "total": total,
+            "agreed": agreed,
+            "agreement_rate_percent": rate,
+        }
 
     def _to_dict(self, row: sqlite3.Row | None) -> dict | None:
-        """Convert a SQLite row to a dict and parse recommendation JSON."""
+        """Convert a database row and parse the stored recommendation JSON."""
         if row is None:
             return None
+
         record = dict(row)
         try:
             record["ai_recommendation"] = json.loads(record["ai_recommendation"])
