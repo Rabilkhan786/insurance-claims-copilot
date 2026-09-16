@@ -113,7 +113,6 @@ insurance-claims-copilot/
 │   └── settings.py         # Loads YAML + environment variables
 ├── Data/
 │   ├── insurance_documents/ # Source policy PDFs
-│   ├── excluded_documents/  # Documents intentionally not indexed
 │   └── seed.py              # Creates demo SQLite data
 ├── src/
 │   ├── agent/              # LLM agent, recommendation model, LangGraph workflow
