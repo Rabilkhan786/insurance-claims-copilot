@@ -1,12 +1,8 @@
-"""Root entry point for the PDF-to-Pinecone indexing workflow.
+"""Index policy PDFs into Pinecone.
 
-Run with:  uv run python main.py           (add to the existing index)
-           uv run python main.py --reset   (wipe the namespace first, then rebuild)
-
-Runs the section-aware pipeline (src/ingestion/pipeline.py) over every PDF
-in Data/insurance_documents/ and upserts the result into Pinecone.
-Upserts are idempotent -- document IDs hash the chunk's own content -- so
-re-running overwrites the same vectors rather than duplicating them.
+Run:
+    uv run python main.py
+    uv run python main.py --reset
 """
 from __future__ import annotations
 
@@ -19,12 +15,11 @@ from config import settings
 from src.ingestion import run_pipeline
 from src.utils import configure_logging
 
-
 logger = logging.getLogger(__name__)
 
 
 def save_indexing_manifest(counters: dict) -> None:
-    """Save the latest indexing run's result in the artifacts folder."""
+    """Save a summary of the latest indexing run."""
     settings.artifacts_dir.mkdir(parents=True, exist_ok=True)
 
     manifest = {
@@ -51,14 +46,7 @@ def save_indexing_manifest(counters: dict) -> None:
 
 
 def clear_index() -> None:
-    """Delete every vector in the namespace, in both indexes.
-
-    WHY this is needed: a document ID is a hash of the chunk's own content, so
-    re-running the pipeline overwrites the chunks it produces this time. It has
-    no way to know about chunks it produced last time from a PDF that has since
-    been removed -- those keep answering questions from a document that is no
-    longer part of the corpus. Clearing first is the only way to drop them.
-    """
+    """Remove all vectors from the configured Pinecone namespace."""
     from pinecone import Pinecone
 
     if not settings.pinecone_api_key:
@@ -70,23 +58,26 @@ def clear_index() -> None:
     for name in (settings.dense_index_name, settings.sparse_index_name):
         if name not in existing:
             continue
+
         try:
-            client.Index(name).delete(delete_all=True, namespace=settings.namespace)
+            client.Index(name).delete(
+                delete_all=True,
+                namespace=settings.namespace,
+            )
             print(f"  cleared '{settings.namespace}' in {name}")
         except Exception as error:
-            # A namespace that was already empty raises 404 -- nothing to drop.
             print(f"  {name}: nothing to clear ({error})")
 
 
 def main() -> None:
-    """Parse every policy PDF, embed the chunks, and upload them."""
+    """Parse policy PDFs and upload their chunks to Pinecone."""
     configure_logging()
 
     parser = argparse.ArgumentParser(description="Index policy PDFs into Pinecone")
     parser.add_argument(
         "--reset",
         action="store_true",
-        help="Wipe the namespace first, then rebuild from scratch",
+        help="Clear the namespace before indexing",
     )
     args = parser.parse_args()
 
@@ -96,9 +87,7 @@ def main() -> None:
 
     counters = run_pipeline(push_to_pinecone=True)
     if not counters["documents"]:
-        raise RuntimeError(
-            f"No eligible PDF chunks found in {settings.data_dir}"
-        )
+        raise RuntimeError(f"No eligible PDF chunks found in {settings.data_dir}")
 
     save_indexing_manifest(counters)
 
