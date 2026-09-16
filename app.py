@@ -1,8 +1,4 @@
-"""FastAPI backend for the Claims Copilot.
-
-Run with:  uv run uvicorn app:app --port 8000
-      or:  uv run python app.py
-"""
+"""FastAPI backend for the Claims Copilot."""
 from __future__ import annotations
 
 import logging
@@ -50,7 +46,7 @@ class ResetRequest(BaseModel):
 
 
 class ClaimRequest(BaseModel):
-    """One claim as the employee typed it into the form."""
+    """Claim details submitted by an employee."""
 
     customer_id: str = Field(min_length=1)
     policy_id: str = Field(min_length=1)
@@ -65,11 +61,7 @@ class ClaimRequest(BaseModel):
 
 
 class ClaimResponse(BaseModel):
-    """A recommendation awaiting review -- never a settled outcome.
-
-    `recommendation` is a ClaimRecommendation: its status and payable_amount
-    come from the deterministic engine, not from the model.
-    """
+    """Claim recommendation waiting for employee review."""
 
     session_id: str
     awaiting_review: bool
@@ -78,7 +70,7 @@ class ClaimResponse(BaseModel):
 
 
 class DecisionRequest(BaseModel):
-    """The employee's call on a recommendation that is waiting for review."""
+    """Employee decision for a paused claim review."""
 
     session_id: str = Field(min_length=1)
     decision: str = Field(pattern="^(approve|edit|reject)$")
@@ -96,12 +88,7 @@ class DecisionResponse(BaseModel):
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
-    """Warm up the embedder and reranker once for each API process.
-
-    The agent's tool modules (src/tools/*) each manage their own lazily
-    built singletons -- this just triggers that build at startup instead
-    of on the first request, so the first chat isn't slow.
-    """
+    """Warm up retrieval models when the API starts."""
     try:
         warmup_retriever()
         application.state.agent_ready = True
@@ -112,8 +99,8 @@ async def lifespan(application: FastAPI):
 
 
 app = FastAPI(
-    title="RAG AI Insurance Agent",
-    version="2.0.0",
+    title="AI Health Insurance Claims Copilot",
+    version="1.0.0",
     lifespan=lifespan,
 )
 app.add_middleware(
@@ -122,7 +109,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 app.state.agent_ready = False
 
 
@@ -136,13 +122,12 @@ def _require_agent_ready() -> None:
 
 @app.get("/")
 async def root():
-    """The frontend is streamlit_app.py; this API serves JSON only."""
-    return {"message": "RAG AI Insurance Agent is running"}
+    return {"message": "AI Health Insurance Claims Copilot is running"}
 
 
 @app.get("/health")
 async def health():
-    """Report whether the API process and RAG dependencies are available."""
+    """Return API and retrieval readiness."""
     return {"status": "ok", "ready": app.state.agent_ready}
 
 
@@ -156,7 +141,6 @@ async def chat(
     session_id = x_session_id or request.session_id
     customer_id = x_customer_id or request.customer_id
 
-    # stream=true returns plain text word by word instead of one JSON blob.
     if request.stream:
         return StreamingResponse(
             iterate_in_threadpool(
@@ -166,7 +150,10 @@ async def chat(
         )
 
     return await run_in_threadpool(
-        run_agent, request.question, session_id, customer_id
+        run_agent,
+        request.question,
+        session_id,
+        customer_id,
     )
 
 
@@ -178,12 +165,7 @@ async def reset_memory(request: ResetRequest):
 
 @app.post("/review-claim", response_model=ClaimResponse)
 async def review_claim(request: ClaimRequest):
-    """Analyse one claim and return a recommendation awaiting employee review.
-
-    The graph pauses at the review step, so the response is a proposal, not a
-    settled outcome. Finish it by POSTing to /submit-decision with the same
-    session_id.
-    """
+    """Analyse a claim and pause for employee review."""
     _require_agent_ready()
     claim = request.model_dump(
         exclude={"customer_id", "policy_id", "session_id"},
@@ -201,7 +183,7 @@ async def review_claim(request: ClaimRequest):
 
 @app.post("/submit-decision", response_model=DecisionResponse)
 async def submit_claim_decision(request: DecisionRequest):
-    """Record the employee's decision and resume the paused review."""
+    """Save the employee decision and resume the paused review."""
     _require_agent_ready()
     result = await run_in_threadpool(
         submit_decision,
