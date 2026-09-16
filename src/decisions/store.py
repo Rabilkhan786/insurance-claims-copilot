@@ -106,7 +106,7 @@ class DecisionStore(SqliteStore):
         return [self._to_dict(row) for row in rows]
 
     def agreement_rate(self) -> dict:
-        """Return how often employees approved the AI recommendation as-is."""
+        """Return how often the employee decision matched the AI recommendation."""
         with self._connect() as connection:
             row = connection.execute(
                 "SELECT COUNT(*) AS total, SUM(agreed) AS agreed FROM claim_decisions"
