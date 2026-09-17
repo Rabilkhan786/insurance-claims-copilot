@@ -92,8 +92,7 @@ def normalize_text(text: str) -> str:
 def is_boilerplate(line: str) -> bool:
     """Return True for obvious repeated headers and contact details."""
     lowered = line.lower()
-    configured = getattr(settings, "chunk_skip_patterns", [])
-    if any(pattern.lower() in lowered for pattern in configured):
+    if any(pattern.lower() in lowered for pattern in settings.chunk_skip_patterns):
         return True
     return any(pattern.search(line) for pattern in BOILERPLATE_PATTERNS)
 
@@ -144,12 +143,11 @@ def split_into_sections(text: str) -> list[dict]:
 
 def _hard_split(text: str, max_size: int) -> list[str]:
     """Split an oversized sentence by words as a safe fallback."""
-    words = text.split()
     pieces = []
     current = []
     current_length = 0
 
-    for word in words:
+    for word in text.split():
         added = len(word) + (1 if current else 0)
         if current and current_length + added > max_size:
             pieces.append(" ".join(current))
@@ -213,27 +211,14 @@ def merge_short_pieces(pieces: list[dict], min_size: int) -> list[dict]:
     return merged
 
 
-def score_topics(text: str) -> dict[str, int]:
-    """Count matching patterns for each retrieval topic."""
-    return {
-        topic: sum(bool(pattern.search(text)) for pattern in patterns)
-        for topic, patterns in TOPIC_PATTERNS.items()
-        if any(pattern.search(text) for pattern in patterns)
-    }
-
-
 def detect_topics(text: str) -> list[str]:
     """Return matching retrieval topics, or general when none match."""
-    scores = score_topics(text)
-    if not scores:
-        return ["general"]
-
-    highest = max(scores.values())
-    return [
+    topics = [
         topic
-        for topic, score in scores.items()
-        if score == highest
+        for topic, patterns in TOPIC_PATTERNS.items()
+        if any(pattern.search(text) for pattern in patterns)
     ]
+    return topics or ["general"]
 
 
 def _inherit_list_topics(

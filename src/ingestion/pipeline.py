@@ -11,10 +11,8 @@ from config import settings
 from .chunker import chunk_page, last_topics
 from .page_parser import parse_page
 from .table_classifier import (
-    PINECONE_ONLY,
+    RAG_AND_SQL,
     SKIP,
-    SQL_AND_PINECONE,
-    SQL_ONLY,
     classify_table,
     retrieval_topics,
 )
@@ -79,8 +77,6 @@ def extract_insurer(pdf_metadata: dict | None = None) -> str:
     if any(name in lowered for name in software_authors):
         return ""
 
-    # PDF author metadata is not guaranteed to be the insurer. Keep it only
-    # when it explicitly looks like an insurance organization.
     if "insurance" not in lowered and "assurance" not in lowered:
         return ""
 
@@ -100,11 +96,7 @@ def _build_document(text: str, metadata: dict, pdf_name: str):
     return Document(page_content=text, metadata=document_metadata)
 
 
-def _table_documents(
-    table: dict,
-    table_type: str,
-    context: dict,
-) -> list:
+def _table_documents(table: dict, table_type: str, context: dict) -> list:
     """Convert one extracted table into retrieval documents."""
     topics = retrieval_topics(table_type)
     sentences = table_to_sentences(
@@ -114,7 +106,6 @@ def _table_documents(
         context["uin"],
         context["page"],
     )
-
     metadata = {
         "uin": context["uin"],
         "insurer": context["insurer"],
@@ -125,36 +116,34 @@ def _table_documents(
         "topics": topics,
         "chunk_type": "table_sentence",
     }
-
     return [
         _build_document(sentence, metadata, context["pdf_name"])
         for sentence in sentences
     ]
 
 
-def _send_to_pinecone(
+def _add_table_documents(
     table: dict,
     table_type: str,
     context: dict,
     counters: dict,
     documents: list,
 ) -> None:
-    """Add table retrieval documents to the current batch."""
+    """Add one table's retrieval documents to the current batch."""
     table_documents = _table_documents(table, table_type, context)
     documents.extend(table_documents)
     counters["table_sentences"] += len(table_documents)
 
 
-def _stage_for_sql(
+def _stage_table_rows(
     table: dict,
     table_type: str,
     context: dict,
     counters: dict,
     staged_rows: list[dict],
 ) -> None:
-    """Stage recognized table rows for optional structured storage."""
+    """Stage recognized table rows for structured use."""
     rows = table_to_rows(table, table_type)
-
     for row in rows:
         staged_rows.append(
             {
@@ -167,8 +156,7 @@ def _stage_for_sql(
                 "row": row,
             }
         )
-
-    counters["sql_rows"] += len(rows)
+    counters["structured_rows"] += len(rows)
 
 
 def _route_table(
@@ -178,7 +166,7 @@ def _route_table(
     documents: list,
     staged_rows: list[dict],
 ) -> str | None:
-    """Classify one table and route it to RAG, SQL staging, or both."""
+    """Classify one table and keep its useful content."""
     verdict = classify_table(table)
     table_type = verdict["table_type"]
     destination = verdict["destination"]
@@ -191,17 +179,16 @@ def _route_table(
         counters["tables_skipped"] += 1
         return None
 
-    if destination in (SQL_AND_PINECONE, PINECONE_ONLY):
-        _send_to_pinecone(
-            table,
-            table_type,
-            context,
-            counters,
-            documents,
-        )
+    _add_table_documents(
+        table,
+        table_type,
+        context,
+        counters,
+        documents,
+    )
 
-    if destination in (SQL_AND_PINECONE, SQL_ONLY):
-        _stage_for_sql(
+    if destination == RAG_AND_SQL:
+        _stage_table_rows(
             table,
             table_type,
             context,
@@ -221,7 +208,6 @@ def _process_one_page(
 ) -> list[str] | None:
     """Process the prose and tables from one PDF page."""
     prose, tables = parse_page(page)
-
     chunks = chunk_page(
         prose,
         context["uin"],
@@ -239,7 +225,6 @@ def _process_one_page(
                 context["pdf_name"],
             )
         )
-
     counters["chunks"] += len(chunks)
 
     routes = []
@@ -316,7 +301,7 @@ def new_counters() -> dict:
         "pdfs_without_uin": 0,
         "chunks": 0,
         "table_sentences": 0,
-        "sql_rows": 0,
+        "structured_rows": 0,
         "tables_skipped": 0,
         "tables_by_type": {},
     }
@@ -340,7 +325,7 @@ def print_summary(counters: dict, staged_path: Path) -> None:
     print(f"  PDFs without UIN    : {counters['pdfs_without_uin']}")
     print(f"  Text chunks         : {counters['chunks']}")
     print(f"  Table sentences     : {counters['table_sentences']}")
-    print(f"  Rows staged for SQL : {counters['sql_rows']}")
+    print(f"  Structured rows     : {counters['structured_rows']}")
     print(f"  Staged rows file    : {staged_path}")
     print(f"  Tables skipped      : {counters['tables_skipped']}")
     print("  Tables by type:")
@@ -384,16 +369,11 @@ def run_pipeline(push_to_pinecone: bool = True) -> dict:
 
     print(f"Found {len(pdf_paths)} PDFs in {settings.data_dir}")
     counters = new_counters()
-
-    documents, staged_rows = _collect_documents_from_pdfs(
-        pdf_paths,
-        counters,
-    )
+    documents, staged_rows = _collect_documents_from_pdfs(pdf_paths, counters)
     staged_path = save_staged_tables(staged_rows)
 
     if push_to_pinecone and documents:
         print(f"\nEmbedding and upserting {len(documents)} documents...")
-
         from src.embeddings import get_embedder
         from src.vectorstores import PineconeHybridStore
 

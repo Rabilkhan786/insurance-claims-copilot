@@ -157,6 +157,10 @@ def persist_decision_node(state: WorkflowState) -> dict:
     """Persist the recommendation and the employee decision in the audit trail."""
     decision = state.get("decision") or {}
     claim = state.get("claim") or {}
+    employee_decision = decision.get("decision")
+
+    if not employee_decision:
+        return {"error": "An employee decision is required before saving."}
 
     try:
         get_decision_store().record(
@@ -164,7 +168,7 @@ def persist_decision_node(state: WorkflowState) -> dict:
             customer_id=state.get("customer_id") or "",
             policy_id=state.get("policy_id"),
             recommendation=state.get("recommendation") or {},
-            employee_decision=decision.get("decision", "approve"),
+            employee_decision=employee_decision,
             employee_payable_amount=decision.get("payable_amount"),
             employee_edits=decision.get("edits"),
             override_reason=decision.get("reason"),
@@ -179,44 +183,40 @@ def persist_decision_node(state: WorkflowState) -> dict:
 
 
 def _route_entry(state: WorkflowState) -> str:
-    return "eligibility" if state.get("claim") else "agent"
+    return "eligibility" if state.get("claim") is not None else "agent"
 
 
 def _after_eligibility(state: WorkflowState) -> str:
     return END if state.get("error") else "explain_claim"
 
 
-_workflow = None
-
-
+@lru_cache(maxsize=1)
 def get_workflow():
-    """Return the compiled outer workflow, building it once per process."""
-    global _workflow
-    if _workflow is None:
-        builder = StateGraph(WorkflowState, context_schema=Context)
-        builder.add_node("eligibility", eligibility_node)
-        builder.add_node("agent", get_agent())
-        builder.add_node("explain_claim", get_claims_agent())
-        builder.add_node("review", review_node)
-        builder.add_node("persist_decision", persist_decision_node)
+    """Return the compiled workflow."""
+    builder = StateGraph(WorkflowState, context_schema=Context)
+    builder.add_node("eligibility", eligibility_node)
+    builder.add_node("agent", get_agent())
+    builder.add_node("explain_claim", get_claims_agent())
+    builder.add_node("review", review_node)
+    builder.add_node("persist_decision", persist_decision_node)
 
-        builder.add_conditional_edges(
-            START,
-            _route_entry,
-            {"eligibility": "eligibility", "agent": "agent"},
-        )
-        builder.add_conditional_edges(
-            "eligibility",
-            _after_eligibility,
-            {"explain_claim": "explain_claim", END: END},
-        )
-        builder.add_edge("explain_claim", "review")
-        builder.add_edge("agent", END)
-        builder.add_edge("review", "persist_decision")
-        builder.add_edge("persist_decision", END)
-        _workflow = builder.compile(checkpointer=get_checkpointer())
-        logger.info("workflow_built")
-    return _workflow
+    builder.add_conditional_edges(
+        START,
+        _route_entry,
+        {"eligibility": "eligibility", "agent": "agent"},
+    )
+    builder.add_conditional_edges(
+        "eligibility",
+        _after_eligibility,
+        {"explain_claim": "explain_claim", END: END},
+    )
+    builder.add_edge("explain_claim", "review")
+    builder.add_edge("agent", END)
+    builder.add_edge("review", "persist_decision")
+    builder.add_edge("persist_decision", END)
+
+    logger.info("workflow_built")
+    return builder.compile(checkpointer=get_checkpointer())
 
 
 def _normalise_citations(text: str) -> str:

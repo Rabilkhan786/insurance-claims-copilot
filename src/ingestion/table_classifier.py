@@ -4,11 +4,9 @@ from __future__ import annotations
 import re
 
 SKIP = "skip"
-SQL_AND_PINECONE = "sql_and_pinecone"
-SQL_ONLY = "sql_only"
-PINECONE_ONLY = "pinecone_only"
+RAG_ONLY = "rag_only"
+RAG_AND_SQL = "rag_and_sql"
 
-# These rules describe common insurance concepts, not specific products.
 TABLE_RULES = {
     "waiting_period": (
         "waiting period",
@@ -75,73 +73,51 @@ def retrieval_topics(table_type: str) -> list[str]:
 
 def table_to_text(table: dict) -> str:
     """Flatten table cells into lowercase text for classification."""
-    parts = []
+    values = []
     for row in table.get("rows", []):
         for cell in row:
-            if cell is not None:
-                value = " ".join(str(cell).split())
-                if value:
-                    parts.append(value)
-    return " ".join(parts).lower()
+            value = " ".join(str(cell or "").split())
+            if value:
+                values.append(value)
+    return " ".join(values).lower()
 
 
 def _contains_any(text: str, keywords: tuple[str, ...]) -> bool:
-    """Return True when any keyword appears in table text."""
     return any(keyword in text for keyword in keywords)
 
 
+def _header_text(table: dict) -> str:
+    return " ".join(str(cell or "") for cell in table.get("header", [])).lower()
+
+
 def _is_hospital_network(table: dict) -> bool:
-    """Detect a hospital network from common structural columns."""
-    header = " ".join(
-        str(cell or "")
-        for cell in table.get("header", [])
-    ).lower()
+    header = _header_text(table)
     return "hospital" in header and "address" in header
 
 
 def _is_premium_grid(table: dict) -> bool:
-    """Detect a premium table from age-style columns and numeric values."""
-    header = " ".join(
-        str(cell or "")
-        for cell in table.get("header", [])
-    ).lower()
-    has_age = "age" in header or bool(re.search(r"\b\d{2}\s*[-–]\s*\d{2}\b", header))
+    header = _header_text(table)
+    has_age = "age" in header or bool(
+        re.search(r"\b\d{2}\s*[-–]\s*\d{2}\b", header)
+    )
     has_premium = "premium" in header or "si/age" in header
     return has_age and has_premium
 
 
 def classify_table(table: dict) -> dict:
-    """Return a table type and storage destination.
-
-    Recognized business tables are staged for structured use and indexed for
-    retrieval. Unrecognized tables are still indexed as generic RAG content so
-    a new PDF never requires a code change just to preserve its information.
-    """
+    """Return the table type and where it should be stored."""
     text = table_to_text(table)
-
     if not text:
         return {"table_type": "empty", "destination": SKIP}
 
     if _is_hospital_network(table):
-        return {
-            "table_type": "hospital_network",
-            "destination": PINECONE_ONLY,
-        }
+        return {"table_type": "hospital_network", "destination": RAG_ONLY}
 
     if _is_premium_grid(table):
-        return {
-            "table_type": "premium_rate",
-            "destination": SQL_AND_PINECONE,
-        }
+        return {"table_type": "premium_rate", "destination": RAG_AND_SQL}
 
     for table_type, keywords in TABLE_RULES.items():
         if _contains_any(text, keywords):
-            return {
-                "table_type": table_type,
-                "destination": SQL_AND_PINECONE,
-            }
+            return {"table_type": table_type, "destination": RAG_AND_SQL}
 
-    return {
-        "table_type": "generic_table",
-        "destination": PINECONE_ONLY,
-    }
+    return {"table_type": "generic_table", "destination": RAG_ONLY}

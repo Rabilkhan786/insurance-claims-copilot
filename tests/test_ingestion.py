@@ -14,8 +14,6 @@ def _table(rows):
     return {"rows": rows, "header": rows[0]}
 
 
-# --- metadata ---------------------------------------------------------------
-
 def test_extract_uin_from_filename():
     assert extract_uin("SHAHLIP22027V032122_HEALTH.pdf", "") == "SHAHLIP22027V032122"
 
@@ -32,8 +30,6 @@ def test_product_falls_back_to_filename():
     assert extract_product("health_policy_v2.pdf", {}) == "health policy v2"
 
 
-# --- table classifier -------------------------------------------------------
-
 def test_classifier_tags_waiting_period_table():
     table = _table([
         ["Condition", "Waiting Period"],
@@ -42,7 +38,7 @@ def test_classifier_tags_waiting_period_table():
 
     result = classify_table(table)
     assert result["table_type"] == "waiting_period"
-    assert result["destination"] == "sql_and_pinecone"
+    assert result["destination"] == "rag_and_sql"
 
 
 def test_classifier_tags_sub_limit_table():
@@ -53,7 +49,7 @@ def test_classifier_tags_sub_limit_table():
 
     result = classify_table(table)
     assert result["table_type"] == "sub_limit"
-    assert result["destination"] == "sql_and_pinecone"
+    assert result["destination"] == "rag_and_sql"
 
 
 def test_classifier_tags_copayment_table():
@@ -73,7 +69,7 @@ def test_classifier_tags_premium_grid():
 
     result = classify_table(table)
     assert result["table_type"] == "premium_rate"
-    assert result["destination"] == "sql_and_pinecone"
+    assert result["destination"] == "rag_and_sql"
 
 
 def test_unknown_table_is_preserved_for_rag():
@@ -82,10 +78,9 @@ def test_unknown_table_is_preserved_for_rag():
         ["Home nursing", "Available after discharge"],
     ])
 
-    result = classify_table(table)
-    assert result == {
+    assert classify_table(table) == {
         "table_type": "generic_table",
-        "destination": "pinecone_only",
+        "destination": "rag_only",
     }
 
 
@@ -96,14 +91,12 @@ def test_non_payable_table_is_not_silently_dropped():
         ["Registration charges", "Not payable"],
     ])
 
-    assert classify_table(table)["destination"] == "pinecone_only"
+    assert classify_table(table)["destination"] == "rag_only"
 
 
 def test_unmapped_table_type_uses_general_topic():
     assert retrieval_topics("brand_new_table_shape") == ["general"]
 
-
-# --- table conversion -------------------------------------------------------
 
 def test_generic_table_sentence_keeps_header_meaning():
     table = _table([
@@ -124,8 +117,6 @@ def test_generic_table_sentence_keeps_header_meaning():
     assert "Limit: Rs 5,000" in sentences[0]
     assert "page 3" in sentences[0]
 
-
-# --- chunker ----------------------------------------------------------------
 
 def test_chunker_does_not_end_a_chunk_mid_sentence():
     text = (
@@ -188,8 +179,6 @@ def test_detect_topic_tags_shall_not_be_liable_as_exclusion():
     text = "The Company shall not be liable for dental treatment of any kind."
     assert detect_topics(text)[0] == "exclusion"
 
-
-# --- page parser ------------------------------------------------------------
 
 def _page_with_text(body: str):
     """Build a one-page in-memory PDF for parser tests."""

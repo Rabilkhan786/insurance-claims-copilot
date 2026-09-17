@@ -29,6 +29,9 @@ def _add_months(start: date, months: int) -> date:
 def compute_age(date_of_birth: str | date, as_of: str | date) -> int:
     birth = _parse_date(date_of_birth)
     reference = _parse_date(as_of)
+    if birth > reference:
+        raise ValueError("date_of_birth cannot be after the reference date")
+
     age = reference.year - birth.year
     if (reference.month, reference.day) < (birth.month, birth.day):
         age -= 1
@@ -40,6 +43,9 @@ def compute_waiting_period(
     waiting_period_months: int,
     today: str | date | None = None,
 ) -> dict:
+    if waiting_period_months < 0:
+        raise ValueError("waiting_period_months cannot be negative")
+
     start = _parse_date(policy_start_date)
     as_of = _parse_date(today) if today else date.today()
     eligible_date = _add_months(start, waiting_period_months)
@@ -167,6 +173,17 @@ def calculate_payable_amount(
     deductible: float | None = None,
 ) -> dict:
     """Calculate the insurer's payable amount and deductions."""
+    if bill_amount < 0:
+        raise ValueError("bill_amount cannot be negative")
+    if remaining_sum_insured < 0:
+        raise ValueError("remaining_sum_insured cannot be negative")
+    if sub_limit is not None and sub_limit < 0:
+        raise ValueError("sub_limit cannot be negative")
+    if deductible is not None and deductible < 0:
+        raise ValueError("deductible cannot be negative")
+    if copay_percent is not None and not 0 <= copay_percent <= 100:
+        raise ValueError("copay_percent must be between 0 and 100")
+
     sub_limit = bill_amount if sub_limit is None else sub_limit
     copay_percent = 0 if copay_percent is None else copay_percent
     deductible = 0 if deductible is None else deductible

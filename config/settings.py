@@ -37,7 +37,6 @@ class Settings:
     batch_size: int
     rag_cache_ttl_seconds: int
     crm_db_path: Path
-    chunk_strategy: str
     max_chunk_size: int
     min_chunk_size: int
     tag_topics: bool
@@ -106,7 +105,6 @@ def load_settings() -> Settings:
         batch_size=int(config["batch_size"]),
         rag_cache_ttl_seconds=int(cache.get("rag_ttl_seconds", 3600)),
         crm_db_path=root / database.get("crm_path", "data/crm.db"),
-        chunk_strategy=chunking["strategy"],
         max_chunk_size=int(chunking["max_chunk_size"]),
         min_chunk_size=int(chunking["min_chunk_size"]),
         tag_topics=bool(chunking["tag_topics"]),
