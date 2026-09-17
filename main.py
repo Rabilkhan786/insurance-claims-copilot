@@ -25,10 +25,11 @@ def save_indexing_manifest(counters: dict) -> None:
     manifest = {
         "indexed_at": datetime.now(UTC).isoformat(),
         "pdf_count": counters["pdfs"],
+        "pdfs_without_uin": counters["pdfs_without_uin"],
         "document_count": counters["documents"],
         "text_chunks": counters["chunks"],
         "table_sentences": counters["table_sentences"],
-        "sql_rows_staged": counters["sql_rows"],
+        "structured_rows": counters["structured_rows"],
         "tables_skipped": counters["tables_skipped"],
         "tables_by_type": counters["tables_by_type"],
         "embedding_model": settings.embedding_model,
