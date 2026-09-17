@@ -324,8 +324,8 @@ def _render_actions(employee: str, recommendation: dict) -> None:
                 "The copilot could not establish every required fact. "
                 "Approving records that you decided anyway."
             )
-        st.write("Record the recommendation exactly as it stands.")
-        if st.button("Approve as recommended", type="primary"):
+        st.write("Record your decision to approve this claim.")
+        if st.button("Approve claim", type="primary"):
             _save("approve", employee)
 
     with edit:
@@ -346,7 +346,7 @@ def _render_actions(employee: str, recommendation: dict) -> None:
 
     with reject:
         reason = st.text_area("Reason for rejecting", key="reject_note")
-        if st.button("Reject recommendation"):
+        if st.button("Reject claim"):
             if not reason.strip():
                 st.warning("Please give a reason before rejecting.")
             else:
