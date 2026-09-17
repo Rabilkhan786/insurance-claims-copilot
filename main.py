@@ -31,7 +31,6 @@ def save_indexing_manifest(counters: dict) -> None:
         "sql_rows_staged": counters["sql_rows"],
         "tables_skipped": counters["tables_skipped"],
         "tables_by_type": counters["tables_by_type"],
-        "chunk_strategy": settings.chunk_strategy,
         "embedding_model": settings.embedding_model,
         "dense_index": settings.dense_index_name,
         "sparse_index": settings.sparse_index_name,
@@ -59,14 +58,11 @@ def clear_index() -> None:
         if name not in existing:
             continue
 
-        try:
-            client.Index(name).delete(
-                delete_all=True,
-                namespace=settings.namespace,
-            )
-            print(f"  cleared '{settings.namespace}' in {name}")
-        except Exception as error:
-            print(f"  {name}: nothing to clear ({error})")
+        client.Index(name).delete(
+            delete_all=True,
+            namespace=settings.namespace,
+        )
+        print(f"  cleared '{settings.namespace}' in {name}")
 
 
 def main() -> None:
