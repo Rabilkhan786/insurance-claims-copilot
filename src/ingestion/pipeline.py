@@ -1,4 +1,4 @@
-"""Parse policy PDFs into retrieval documents and structured table rows."""
+"""Parse policy PDFs into retrieval documents and optional structured rows."""
 from __future__ import annotations
 
 import json
@@ -25,58 +25,13 @@ logger = logging.getLogger(__name__)
 UIN_PATTERN = re.compile(r"\b[A-Z]{5,8}\d{4,5}V\d{6}\b")
 LEGACY_UIN_PATTERN = re.compile(r"\bIRDAI{0,2}/[A-Z0-9()./\-]{5,50}")
 
-KNOWN_INSURERS = (
-    "Star Health",
-    "Aditya Birla Health",
-    "ICICI Lombard",
-    "HDFC ERGO",
-    "Bharti AXA",
-    "Future Generali",
-    "IFFCO Tokio",
-    "Navi General",
-    "Reliance General",
-    "TATA AIG",
-    "Universal Sompo",
-    "Acko General",
-    "New India Assurance",
-    "Oriental Insurance",
-    "Care Health",
-    "Niva Bupa",
-    "SBI General",
-    "Cholamandalam",
-    "Bajaj Allianz",
-)
-
-UIN_PREFIX_TO_INSURER = {
-    "SHA": "Star Health",
-    "ADI": "Aditya Birla Health",
-    "ICI": "ICICI Lombard",
-    "HDF": "HDFC ERGO",
-    "BHA": "Bharti AXA",
-    "FGI": "Future Generali",
-    "IFF": "IFFCO Tokio",
-    "NAV": "Navi General",
-    "RHI": "Reliance General",
-    "TAT": "TATA AIG",
-    "UNI": "Universal Sompo",
-    "ACK": "Acko General",
-    "NIA": "New India Assurance",
-    "OBI": "Oriental Insurance",
-    "BAJ": "Bajaj Allianz",
-    "CHI": "Cholamandalam",
-    "NBH": "Niva Bupa",
-}
-
 
 def extract_uin(pdf_name: str, sample_text: str) -> str:
-    """Find a policy UIN in the filename or sampled PDF text."""
-    match = UIN_PATTERN.search(pdf_name.upper())
-    if match:
-        return match.group(0)
-
-    match = UIN_PATTERN.search(sample_text.upper())
-    if match:
-        return match.group(0)
+    """Return a UIN when one is present, otherwise an empty string."""
+    for text in (pdf_name, sample_text):
+        match = UIN_PATTERN.search(text.upper())
+        if match:
+            return match.group(0)
 
     match = LEGACY_UIN_PATTERN.search(sample_text.upper())
     if match:
@@ -94,22 +49,39 @@ def sample_pages_for_uin(pdf, page_limit: int = 4) -> str:
     return "\n".join(pdf[index].get_text() for index in indexes)
 
 
-def extract_insurer(first_page_text: str, uin: str) -> str:
-    """Identify the insurer from page text or the UIN prefix."""
-    lowered = first_page_text.lower()
-    for insurer in KNOWN_INSURERS:
-        if insurer.lower() in lowered:
-            return insurer
+def extract_product(pdf_name: str, pdf_metadata: dict | None = None) -> str:
+    """Return the PDF title when available, otherwise a cleaned filename."""
+    metadata = pdf_metadata or {}
+    title = " ".join(str(metadata.get("title") or "").split()).strip()
+    if title:
+        return title[:160]
 
-    return UIN_PREFIX_TO_INSURER.get(uin[:3].upper(), "Unknown Insurer")
-
-
-def extract_product(pdf_name: str) -> str:
-    """Create a readable product name from the PDF filename."""
     stem = Path(pdf_name).stem
     stem = re.sub(r"[_\-]+", " ", stem)
     stem = re.sub(r"\s+", " ", stem)
     return stem.strip()
+
+
+def extract_insurer(pdf_metadata: dict | None = None) -> str:
+    """Return insurer metadata when the PDF explicitly provides it.
+
+    We deliberately do not maintain a hard-coded insurer-name list. Unknown
+    metadata stays empty rather than guessing from a filename or UIN prefix.
+    """
+    metadata = pdf_metadata or {}
+    author = " ".join(str(metadata.get("author") or "").split()).strip()
+    if not author:
+        return ""
+
+    ignored = {
+        "microsoft word",
+        "adobe acrobat",
+        "acrobat pdfmaker",
+        "unknown",
+    }
+    if author.lower() in ignored:
+        return ""
+    return author[:120]
 
 
 def _build_document(text: str, metadata: dict, pdf_name: str):
@@ -142,7 +114,7 @@ def _table_documents(
         "product": product,
         "page": page,
         "section": table_type,
-        "topic": table_type,
+        "topic": retrieval_topics(table_type)[0],
         "topics": retrieval_topics(table_type),
         "chunk_type": "table_sentence",
     }
@@ -180,13 +152,15 @@ def _stage_for_sql(
     counters: dict,
     staged_rows: list[dict],
 ) -> None:
-    """Append structured rows created from a table."""
+    """Append structured rows created from a recognized table."""
     rows = table_to_rows(table, table_type)
     for row in rows:
         staged_rows.append(
             {
                 "uin": context["uin"],
                 "insurer": context["insurer"],
+                "product": context["product"],
+                "source": context["pdf_name"],
                 "page": context["page"],
                 "table_type": table_type,
                 "row": row,
@@ -202,7 +176,7 @@ def _route_table(
     documents: list,
     staged_rows: list[dict],
 ) -> str | None:
-    """Classify a table and route it to retrieval, SQL staging, or both."""
+    """Classify a table and route it without discarding unknown content."""
     verdict = classify_table(table)
     table_type = verdict["table_type"]
     destination = verdict["destination"]
@@ -286,28 +260,30 @@ def _process_one_page(
 
 
 def process_pdf(pdf_path: Path, counters: dict) -> tuple[list, list[dict]]:
-    """Parse one PDF into retrieval documents and structured rows."""
+    """Parse one readable PDF into retrieval documents and structured rows.
+
+    Missing UIN or insurer metadata never causes the document to be skipped.
+    """
     import pymupdf
 
     documents: list = []
     staged_rows: list[dict] = []
 
     with pymupdf.open(pdf_path) as pdf:
-        first_page_text = pdf[0].get_text() if pdf.page_count else ""
+        metadata = pdf.metadata or {}
         uin = extract_uin(pdf_path.name, sample_pages_for_uin(pdf))
-
-        if not uin:
-            print(f"\n  {pdf_path.name}")
-            print("    SKIPPED: no UIN printed anywhere in this document")
-            logger.warning("pdf_skipped_no_uin name=%s", pdf_path.name)
-            counters["skipped_no_uin"] = counters.get("skipped_no_uin", 0) + 1
-            return [], []
-
-        insurer = extract_insurer(first_page_text, uin)
-        product = extract_product(pdf_path.name)
+        insurer = extract_insurer(metadata)
+        product = extract_product(pdf_path.name, metadata)
 
         print(f"\n  {pdf_path.name}")
-        print(f"    insurer={insurer} | uin={uin} | pages={pdf.page_count}")
+        print(
+            f"    product={product} | uin={uin or 'not found'} "
+            f"| pages={pdf.page_count}"
+        )
+
+        if not uin:
+            counters["pdfs_without_uin"] += 1
+            logger.info("pdf_without_uin name=%s", pdf_path.name)
 
         carry_topics = None
         for page_index in range(pdf.page_count):
@@ -335,6 +311,7 @@ def new_counters() -> dict:
     """Return counters for one indexing run."""
     return {
         "pdfs": 0,
+        "pdfs_without_uin": 0,
         "chunks": 0,
         "table_sentences": 0,
         "sql_rows": 0,
@@ -358,6 +335,7 @@ def print_summary(counters: dict, staged_path: Path) -> None:
     print("INDEXING SUMMARY")
     print("=" * 60)
     print(f"  PDFs processed      : {counters['pdfs']}")
+    print(f"  PDFs without UIN    : {counters['pdfs_without_uin']}")
     print(f"  Text chunks         : {counters['chunks']}")
     print(f"  Table sentences     : {counters['table_sentences']}")
     print(f"  Rows staged for SQL : {counters['sql_rows']}")
@@ -398,8 +376,8 @@ def _collect_documents_from_pdfs(
 
 
 def run_pipeline(push_to_pinecone: bool = True) -> dict:
-    """Process all policy PDFs and optionally index the documents."""
-    pdf_paths = sorted(settings.data_dir.glob("*.pdf"))
+    """Process every PDF under the configured document directory."""
+    pdf_paths = sorted(settings.data_dir.rglob("*.pdf"))
     if not pdf_paths:
         raise RuntimeError(f"No PDFs found in {settings.data_dir}")
 
