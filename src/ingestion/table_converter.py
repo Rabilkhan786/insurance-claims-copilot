@@ -1,4 +1,4 @@
-"""Convert extracted policy tables into text and structured rows."""
+"""Convert extracted policy tables into retrievable text and structured rows."""
 from __future__ import annotations
 
 import logging
@@ -8,41 +8,6 @@ logger = logging.getLogger(__name__)
 
 ROW_INDEX_PATTERN = re.compile(r"^\(?(?:[ivxlc]+|\d{1,3})\)?[.)]?$", re.I)
 EMPTY_VALUES = {"", "nan", "none", "null", "-", "--", "n/a", "na"}
-
-TEMPLATES = {
-    "sub_limit": (
-        "Under {insurer} (UIN: {uin}, page {page}), {subject} has a "
-        "sub-limit of {value}."
-    ),
-    "waiting_period": (
-        "Under {insurer} (UIN: {uin}, page {page}), waiting period for "
-        "{subject} is {value}."
-    ),
-    "copayment": (
-        "Under {insurer} (UIN: {uin}, page {page}), co-payment of {value} "
-        "applies for {subject}."
-    ),
-    "room_rent": (
-        "Under {insurer} (UIN: {uin}, page {page}), room rent for SI "
-        "{subject} is limited to {value} per day."
-    ),
-    "plan_comparison": (
-        "Under {insurer} (UIN: {uin}, page {page}), {value} plan: {subject} "
-        "is {extra}."
-    ),
-    "accidental_payout": (
-        "Under {insurer} (UIN: {uin}, page {page}), {subject} pays out "
-        "{value} of sum insured."
-    ),
-    "modern_treatment": (
-        "Under {insurer} (UIN: {uin}, page {page}), {subject} has a coverage "
-        "limit of {value}."
-    ),
-}
-
-GENERIC_TEMPLATE = (
-    "Under {insurer} (UIN: {uin}, page {page}), {subject}: {value}."
-)
 
 
 def _clean_cell(cell) -> str:
@@ -57,6 +22,26 @@ def _is_empty(value: str) -> bool:
     return value.strip().lower() in EMPTY_VALUES
 
 
+def _source_label(insurer: str, uin: str, page: int) -> str:
+    """Build a readable citation label from available metadata."""
+    parts = []
+    if insurer:
+        parts.append(insurer)
+    if uin:
+        parts.append(f"UIN {uin}")
+    parts.append(f"page {page}")
+    return ", ".join(parts)
+
+
+def _row_values(row: list) -> list[str]:
+    """Return non-empty cleaned cells from one table row."""
+    return [
+        value
+        for value in (_clean_cell(cell) for cell in row)
+        if not _is_empty(value)
+    ]
+
+
 def row_to_sentence(
     row: list,
     table_type: str,
@@ -64,29 +49,14 @@ def row_to_sentence(
     uin: str,
     page: int,
 ) -> str | None:
-    """Convert one table row into a retrievable sentence."""
-    cells = [_clean_cell(cell) for cell in row]
-    if len(cells) < 2:
+    """Convert one table row into a generic retrievable sentence."""
+    values = _row_values(row)
+    if len(values) < 2:
         return None
 
-    subject, value = cells[0], cells[1]
-    extra = cells[2] if len(cells) > 2 else ""
-
-    if _is_empty(subject) or _is_empty(value):
-        return None
-
-    template = TEMPLATES.get(table_type, GENERIC_TEMPLATE)
-    if table_type == "plan_comparison" and _is_empty(extra):
-        template = GENERIC_TEMPLATE
-
-    return template.format(
-        insurer=insurer,
-        uin=uin,
-        page=page,
-        subject=subject,
-        value=value,
-        extra=extra,
-    )
+    source = _source_label(insurer, uin, page)
+    content = " | ".join(values)
+    return f"Policy table ({table_type}; {source}): {content}."
 
 
 def table_to_sentences(
@@ -96,14 +66,29 @@ def table_to_sentences(
     uin: str,
     page: int,
 ) -> list[str]:
-    """Convert table data rows into citable sentences."""
+    """Convert table rows into citable retrieval sentences."""
     rows = table.get("rows", [])
-    if len(rows) < 2:
+    if not rows:
         return []
 
+    header = _row_values(rows[0])
     sentences = []
+
+    # Include the header in each sentence when possible. This preserves meaning
+    # for new table layouts without needing a custom template for every PDF.
     for row in rows[1:]:
-        sentence = row_to_sentence(row, table_type, insurer, uin, page)
+        values = _row_values(row)
+        if not values:
+            continue
+
+        source = _source_label(insurer, uin, page)
+        if header and len(header) == len(values):
+            pairs = [f"{name}: {value}" for name, value in zip(header, values)]
+            content = " | ".join(pairs)
+            sentence = f"Policy table ({table_type}; {source}): {content}."
+        else:
+            sentence = row_to_sentence(row, table_type, insurer, uin, page)
+
         if sentence:
             sentences.append(sentence)
 
@@ -124,7 +109,6 @@ def table_to_rows(table: dict, table_type: str) -> list[dict]:
 
     first_row = [_clean_cell(cell) for cell in rows[0]]
 
-    # A continuation table may start with a numbered data row instead of a header.
     if first_row and ROW_INDEX_PATTERN.match(first_row[0]):
         header = [f"col_{index}" for index in range(len(first_row))]
         data_rows = rows
