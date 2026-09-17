@@ -1,4 +1,4 @@
-"""Parse policy PDFs into retrieval documents and optional structured rows."""
+"""Run PDF ingestion for policy documents."""
 from __future__ import annotations
 
 import json
@@ -27,99 +27,107 @@ LEGACY_UIN_PATTERN = re.compile(r"\bIRDAI{0,2}/[A-Z0-9()./\-]{5,50}")
 
 
 def extract_uin(pdf_name: str, sample_text: str) -> str:
-    """Return a UIN when one is present, otherwise an empty string."""
+    """Return a policy UIN when present; otherwise return an empty string."""
     for text in (pdf_name, sample_text):
         match = UIN_PATTERN.search(text.upper())
         if match:
             return match.group(0)
 
-    match = LEGACY_UIN_PATTERN.search(sample_text.upper())
-    if match:
-        return match.group(0).rstrip("./-)")
+    legacy_match = LEGACY_UIN_PATTERN.search(sample_text.upper())
+    if legacy_match:
+        return legacy_match.group(0).rstrip("./-)")
 
     return ""
 
 
 def sample_pages_for_uin(pdf, page_limit: int = 4) -> str:
-    """Return text from early pages and the final page for UIN lookup."""
+    """Read a few pages for optional UIN extraction."""
     indexes = list(range(min(page_limit, pdf.page_count)))
-    if pdf.page_count and (pdf.page_count - 1) not in indexes:
-        indexes.append(pdf.page_count - 1)
+    last_page = pdf.page_count - 1
+
+    if pdf.page_count and last_page not in indexes:
+        indexes.append(last_page)
 
     return "\n".join(pdf[index].get_text() for index in indexes)
 
 
 def extract_product(pdf_name: str, pdf_metadata: dict | None = None) -> str:
-    """Return the PDF title when available, otherwise a cleaned filename."""
+    """Return the PDF title or a readable version of its filename."""
     metadata = pdf_metadata or {}
-    title = " ".join(str(metadata.get("title") or "").split()).strip()
+    title = " ".join(str(metadata.get("title") or "").split())
     if title:
         return title[:160]
 
     stem = Path(pdf_name).stem
     stem = re.sub(r"[_\-]+", " ", stem)
-    stem = re.sub(r"\s+", " ", stem)
-    return stem.strip()
+    return re.sub(r"\s+", " ", stem).strip()
 
 
 def extract_insurer(pdf_metadata: dict | None = None) -> str:
-    """Return insurer metadata when the PDF explicitly provides it.
-
-    We deliberately do not maintain a hard-coded insurer-name list. Unknown
-    metadata stays empty rather than guessing from a filename or UIN prefix.
-    """
+    """Return insurer metadata only when the PDF explicitly identifies it."""
     metadata = pdf_metadata or {}
     author = " ".join(str(metadata.get("author") or "").split()).strip()
     if not author:
         return ""
 
-    ignored = {
+    lowered = author.lower()
+    software_authors = (
         "microsoft word",
         "adobe acrobat",
         "acrobat pdfmaker",
-        "unknown",
-    }
-    if author.lower() in ignored:
+    )
+    if any(name in lowered for name in software_authors):
         return ""
+
+    # PDF author metadata is not guaranteed to be the insurer. Keep it only
+    # when it explicitly looks like an insurance organization.
+    if "insurance" not in lowered and "assurance" not in lowered:
+        return ""
+
     return author[:120]
 
 
 def _build_document(text: str, metadata: dict, pdf_name: str):
-    """Create a LangChain document with stable source metadata."""
+    """Create one LangChain document with stable retrieval metadata."""
     from langchain_core.documents import Document
 
-    full_metadata = {
+    document_metadata = {
         **metadata,
         "source": pdf_name,
         "page_number": metadata["page"],
         "category": metadata["chunk_type"],
     }
-    return Document(page_content=text, metadata=full_metadata)
+    return Document(page_content=text, metadata=document_metadata)
 
 
 def _table_documents(
     table: dict,
     table_type: str,
-    insurer: str,
-    uin: str,
-    product: str,
-    page: int,
-    pdf_name: str,
+    context: dict,
 ) -> list:
-    """Convert one table into citable retrieval documents."""
-    sentences = table_to_sentences(table, table_type, insurer, uin, page)
+    """Convert one extracted table into retrieval documents."""
+    topics = retrieval_topics(table_type)
+    sentences = table_to_sentences(
+        table,
+        table_type,
+        context["insurer"],
+        context["uin"],
+        context["page"],
+    )
+
     metadata = {
-        "uin": uin,
-        "insurer": insurer,
-        "product": product,
-        "page": page,
+        "uin": context["uin"],
+        "insurer": context["insurer"],
+        "product": context["product"],
+        "page": context["page"],
         "section": table_type,
-        "topic": retrieval_topics(table_type)[0],
-        "topics": retrieval_topics(table_type),
+        "topic": topics[0],
+        "topics": topics,
         "chunk_type": "table_sentence",
     }
+
     return [
-        _build_document(sentence, metadata, pdf_name)
+        _build_document(sentence, metadata, context["pdf_name"])
         for sentence in sentences
     ]
 
@@ -131,16 +139,8 @@ def _send_to_pinecone(
     counters: dict,
     documents: list,
 ) -> None:
-    """Append retrieval documents created from a table."""
-    table_documents = _table_documents(
-        table,
-        table_type,
-        context["insurer"],
-        context["uin"],
-        context["product"],
-        context["page"],
-        context["pdf_name"],
-    )
+    """Add table retrieval documents to the current batch."""
+    table_documents = _table_documents(table, table_type, context)
     documents.extend(table_documents)
     counters["table_sentences"] += len(table_documents)
 
@@ -152,8 +152,9 @@ def _stage_for_sql(
     counters: dict,
     staged_rows: list[dict],
 ) -> None:
-    """Append structured rows created from a recognized table."""
+    """Stage recognized table rows for optional structured storage."""
     rows = table_to_rows(table, table_type)
+
     for row in rows:
         staged_rows.append(
             {
@@ -166,6 +167,7 @@ def _stage_for_sql(
                 "row": row,
             }
         )
+
     counters["sql_rows"] += len(rows)
 
 
@@ -176,7 +178,7 @@ def _route_table(
     documents: list,
     staged_rows: list[dict],
 ) -> str | None:
-    """Classify a table and route it without discarding unknown content."""
+    """Classify one table and route it to RAG, SQL staging, or both."""
     verdict = classify_table(table)
     table_type = verdict["table_type"]
     destination = verdict["destination"]
@@ -217,16 +219,15 @@ def _process_one_page(
     documents: list,
     staged_rows: list[dict],
 ) -> list[str] | None:
-    """Chunk page text and route any tables found on the page."""
-    clean_text, tables = parse_page(page)
-    page_number = context["page"]
+    """Process the prose and tables from one PDF page."""
+    prose, tables = parse_page(page)
 
     chunks = chunk_page(
-        clean_text,
+        prose,
         context["uin"],
         context["insurer"],
         context["product"],
-        page_number,
+        context["page"],
         context.get("carry_topics"),
     )
 
@@ -238,36 +239,37 @@ def _process_one_page(
                 context["pdf_name"],
             )
         )
+
     counters["chunks"] += len(chunks)
 
-    notes = []
+    routes = []
     for table in tables:
-        note = _route_table(
+        route = _route_table(
             table,
             context,
             counters,
             documents,
             staged_rows,
         )
-        if note:
-            notes.append(note)
+        if route:
+            routes.append(route)
 
-    if chunks or notes:
-        suffix = f" | tables: {', '.join(notes)}" if notes else ""
-        print(f"    page {page_number:>3}: {len(chunks):>2} chunks{suffix}")
+    if chunks or routes:
+        table_note = f" | tables: {', '.join(routes)}" if routes else ""
+        print(
+            f"    page {context['page']:>3}: "
+            f"{len(chunks):>2} chunks{table_note}"
+        )
 
     return last_topics(chunks) or context.get("carry_topics")
 
 
 def process_pdf(pdf_path: Path, counters: dict) -> tuple[list, list[dict]]:
-    """Parse one readable PDF into retrieval documents and structured rows.
-
-    Missing UIN or insurer metadata never causes the document to be skipped.
-    """
+    """Convert one readable PDF into RAG documents and structured rows."""
     import pymupdf
 
-    documents: list = []
-    staged_rows: list[dict] = []
+    documents = []
+    staged_rows = []
 
     with pymupdf.open(pdf_path) as pdf:
         metadata = pdf.metadata or {}
@@ -308,7 +310,7 @@ def process_pdf(pdf_path: Path, counters: dict) -> tuple[list, list[dict]]:
 
 
 def new_counters() -> dict:
-    """Return counters for one indexing run."""
+    """Create counters for one ingestion run."""
     return {
         "pdfs": 0,
         "pdfs_without_uin": 0,
@@ -321,7 +323,7 @@ def new_counters() -> dict:
 
 
 def save_staged_tables(staged_rows: list[dict]) -> Path:
-    """Write structured table rows to the artifacts folder."""
+    """Write staged structured rows to the artifacts directory."""
     settings.artifacts_dir.mkdir(parents=True, exist_ok=True)
     path = settings.artifacts_dir / "staged_tables.json"
     path.write_text(json.dumps(staged_rows, indent=2), encoding="utf-8")
@@ -329,7 +331,7 @@ def save_staged_tables(staged_rows: list[dict]) -> Path:
 
 
 def print_summary(counters: dict, staged_path: Path) -> None:
-    """Print a summary of the indexing run."""
+    """Print a compact summary of one ingestion run."""
     print("")
     print("=" * 60)
     print("INDEXING SUMMARY")
@@ -343,11 +345,10 @@ def print_summary(counters: dict, staged_path: Path) -> None:
     print(f"  Tables skipped      : {counters['tables_skipped']}")
     print("  Tables by type:")
 
-    ranked = sorted(
+    for table_type, count in sorted(
         counters["tables_by_type"].items(),
         key=lambda item: -item[1],
-    )
-    for table_type, count in ranked:
+    ):
         print(f"    {table_type:<22} {count}")
 
     print("=" * 60)
@@ -357,26 +358,26 @@ def _collect_documents_from_pdfs(
     pdf_paths: list[Path],
     counters: dict,
 ) -> tuple[list, list[dict]]:
-    """Process all PDFs and collect successful outputs."""
-    all_documents: list = []
-    all_staged_rows: list[dict] = []
+    """Process all PDFs while allowing one bad file to fail independently."""
+    documents = []
+    staged_rows = []
 
     for pdf_path in pdf_paths:
         try:
-            documents, staged_rows = process_pdf(pdf_path, counters)
+            pdf_documents, pdf_rows = process_pdf(pdf_path, counters)
         except Exception:
             logger.exception("pdf_failed path=%s", pdf_path)
             print(f"    -- failed, skipping {pdf_path.name}")
             continue
 
-        all_documents.extend(documents)
-        all_staged_rows.extend(staged_rows)
+        documents.extend(pdf_documents)
+        staged_rows.extend(pdf_rows)
 
-    return all_documents, all_staged_rows
+    return documents, staged_rows
 
 
 def run_pipeline(push_to_pinecone: bool = True) -> dict:
-    """Process every PDF under the configured document directory."""
+    """Process every PDF under the configured policy-document directory."""
     pdf_paths = sorted(settings.data_dir.rglob("*.pdf"))
     if not pdf_paths:
         raise RuntimeError(f"No PDFs found in {settings.data_dir}")
@@ -392,6 +393,7 @@ def run_pipeline(push_to_pinecone: bool = True) -> dict:
 
     if push_to_pinecone and documents:
         print(f"\nEmbedding and upserting {len(documents)} documents...")
+
         from src.embeddings import get_embedder
         from src.vectorstores import PineconeHybridStore
 
