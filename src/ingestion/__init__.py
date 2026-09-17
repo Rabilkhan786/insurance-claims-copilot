@@ -1,4 +1,5 @@
-"""Public exports for the PDF ingestion subpackage."""
+"""PDF ingestion helpers for policy documents."""
+
 from .chunker import chunk_page
 from .page_parser import parse_page
 from .pipeline import run_pipeline

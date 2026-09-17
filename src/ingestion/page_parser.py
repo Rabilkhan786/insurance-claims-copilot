@@ -1,4 +1,4 @@
-"""Separate PDF page text from extracted tables."""
+"""Extract prose and tables from one PDF page."""
 from __future__ import annotations
 
 import logging
@@ -11,7 +11,7 @@ BBOX_TOLERANCE = 5.0
 
 
 def _boxes_overlap(block_box: tuple, table_box: tuple) -> bool:
-    """Return True when a text block intersects a table area."""
+    """Return True when a text block overlaps a table area."""
     bx0, by0, bx1, by1 = block_box
     tx0, ty0, tx1, ty1 = table_box
 
@@ -20,17 +20,18 @@ def _boxes_overlap(block_box: tuple, table_box: tuple) -> bool:
     tx1 += BBOX_TOLERANCE
     ty1 += BBOX_TOLERANCE
 
-    if bx1 < tx0 or bx0 > tx1:
-        return False
-    if by1 < ty0 or by0 > ty1:
-        return False
-    return True
+    return not (
+        bx1 < tx0
+        or bx0 > tx1
+        or by1 < ty0
+        or by0 > ty1
+    )
 
 
-def _find_tables(page) -> list[dict]:
-    """Extract tables and basic table metadata from one page."""
+def _extract_tables(page) -> list[dict]:
+    """Extract detected tables into a small, consistent dictionary shape."""
     try:
-        found = page.find_tables()
+        finder = page.find_tables()
     except Exception as error:
         logger.warning(
             "table_detection_failed page=%s error=%s",
@@ -40,8 +41,8 @@ def _find_tables(page) -> list[dict]:
         return []
 
     tables = []
-    for table in found.tables:
-        rows = table.extract()
+    for table in finder.tables:
+        rows = table.extract() or []
         if not rows:
             continue
 
@@ -54,43 +55,53 @@ def _find_tables(page) -> list[dict]:
                 "col_count": max(len(row) for row in rows),
             }
         )
+
     return tables
 
 
-def _clean_text_blocks(page, table_boxes: list[tuple]) -> str:
-    """Return page text without content that belongs to tables."""
+def is_usable_table(table: dict) -> bool:
+    """Return True when a detected table is large enough to process."""
+    return (
+        table.get("row_count", 0) >= settings.table_min_rows
+        and table.get("col_count", 0) >= settings.table_min_cols
+    )
+
+
+def _extract_prose(page, excluded_boxes: list[tuple]) -> str:
+    """Return page text that is not part of a processed table."""
     lines = []
 
     for block in page.get_text("blocks"):
-        x0, y0, x1, y1, text = block[0], block[1], block[2], block[3], block[4]
-
-        if block[6] != 0:
+        if len(block) < 7 or block[6] != 0:
             continue
 
-        block_box = (x0, y0, x1, y1)
-        if any(_boxes_overlap(block_box, box) for box in table_boxes):
+        block_box = tuple(block[:4])
+        if any(
+            _boxes_overlap(block_box, table_box)
+            for table_box in excluded_boxes
+        ):
             continue
 
-        text = text.strip()
+        text = str(block[4]).strip()
         if text:
             lines.append(text)
 
     return "\n".join(lines)
 
 
-def is_usable_table(table: dict) -> bool:
-    """Return True when a table meets the configured size limits."""
-    return (
-        table["row_count"] >= settings.table_min_rows
-        and table["col_count"] >= settings.table_min_cols
-    )
-
-
 def parse_page(page) -> tuple[str, list[dict]]:
-    """Return clean prose and usable tables from one PDF page."""
-    tables = _find_tables(page) if settings.table_extraction_enabled else []
-    usable_tables = [table for table in tables if is_usable_table(table)]
-    table_boxes = [table["bbox"] for table in tables]
-    clean_text = _clean_text_blocks(page, table_boxes)
+    """Return page prose plus tables that are suitable for ingestion."""
+    if not settings.table_extraction_enabled:
+        return page.get_text().strip(), []
 
-    return clean_text, usable_tables
+    detected_tables = _extract_tables(page)
+    usable_tables = [
+        table for table in detected_tables if is_usable_table(table)
+    ]
+
+    # Only remove tables that we actually keep. Small or unusable detected
+    # tables remain in prose so their text is not silently lost.
+    table_boxes = [table["bbox"] for table in usable_tables]
+    prose = _extract_prose(page, table_boxes)
+
+    return prose, usable_tables
