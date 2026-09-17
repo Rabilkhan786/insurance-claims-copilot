@@ -1,10 +1,4 @@
-"""Tests for the human-in-the-loop half of the claim workflow.
-
-The graph is exercised with a stub agent node and a stub engine, so these run
-without Groq or Pinecone. What is being tested is the LangGraph wiring --
-that the graph really stops at review, that resuming the same thread_id picks
-it back up, and that one audit row lands holding both sides of the decision.
-"""
+"""Tests for the human-in-the-loop claim workflow."""
 from __future__ import annotations
 
 import pytest
@@ -45,12 +39,7 @@ ENGINE_RESULT = {
 
 @pytest.fixture
 def graph(tmp_path, monkeypatch):
-    """The real review and persist nodes, wired to a throwaway store.
-
-    Only the eligibility and agent nodes are stubbed -- those are the two that
-    need the network. review_node and persist_decision_node are the code under
-    test and run exactly as they do in production.
-    """
+    """Build the real review/persist nodes with local test dependencies."""
     store = DecisionStore(tmp_path / "crm.db")
     monkeypatch.setattr(workflow_module, "get_decision_store", lambda: store)
 
@@ -80,7 +69,6 @@ def _config(thread_id: str = "t-1") -> dict:
     return {"configurable": {"thread_id": thread_id}}
 
 
-# --- the pause ---------------------------------------------------------------
 def test_the_graph_stops_at_review_and_hands_back_the_recommendation(graph):
     compiled, _ = graph
 
@@ -105,7 +93,30 @@ def test_nothing_is_recorded_until_the_employee_answers(graph):
     assert store.recent() == []
 
 
-# --- the resume --------------------------------------------------------------
+def test_empty_claim_still_uses_claim_review_path():
+    assert workflow_module._route_entry({"claim": {}}) == "eligibility"
+    assert workflow_module._route_entry({"messages": []}) == "agent"
+
+
+def test_missing_employee_decision_is_not_defaulted_to_approve(tmp_path, monkeypatch):
+    store = DecisionStore(tmp_path / "crm.db")
+    monkeypatch.setattr(workflow_module, "get_decision_store", lambda: store)
+
+    result = workflow_module.persist_decision_node(
+        {
+            "claim": {"claim_id": "CLM-MISSING"},
+            "claim_id": "CLM-MISSING",
+            "customer_id": "CUST001",
+            "policy_id": "POL001",
+            "recommendation": {"status": "approve"},
+            "decision": {},
+        }
+    )
+
+    assert result["error"] == "An employee decision is required before saving."
+    assert store.recent() == []
+
+
 def test_resuming_the_same_thread_records_the_decision(graph):
     compiled, store = graph
     config = _config("t-resume")
@@ -124,7 +135,6 @@ def test_resuming_the_same_thread_records_the_decision(graph):
 
 
 def test_an_edited_amount_leaves_the_recommendation_untouched(graph):
-    """The audit's whole value is that both figures survive."""
     compiled, store = graph
     config = _config("t-edit")
     compiled.invoke({"claim": {}, "claim_id": "CLM-3"}, config=config)
@@ -148,15 +158,19 @@ def test_an_edited_amount_leaves_the_recommendation_untouched(graph):
 
 
 def test_two_claims_on_two_threads_do_not_collide(graph):
-    """Resuming one thread must not finish the other's review."""
     compiled, store = graph
     first, second = _config("t-a"), _config("t-b")
     compiled.invoke({"claim": {}, "claim_id": "CLM-A"}, config=first)
     compiled.invoke({"claim": {}, "claim_id": "CLM-B"}, config=second)
 
     compiled.invoke(
-        Command(resume={"decision": "reject", "decided_by": "emp.demo",
-                        "reason": "Duplicate claim."}),
+        Command(
+            resume={
+                "decision": "reject",
+                "decided_by": "emp.demo",
+                "reason": "Duplicate claim.",
+            }
+        ),
         config=second,
     )
 
@@ -164,15 +178,7 @@ def test_two_claims_on_two_threads_do_not_collide(graph):
     assert [row["claim_id"] for row in rows] == ["CLM-B"]
 
 
-# --- idempotency -------------------------------------------------------------
 def test_review_node_builds_the_same_recommendation_on_both_passes():
-    """Everything before interrupt() runs twice, so it has to be pure.
-
-    review_node builds the recommendation, then calls interrupt(). On resume
-    the node re-enters from the top and builds it again -- if that were not a
-    pure function of state, the employee would approve one thing and the audit
-    would record another.
-    """
     from langchain_core.messages import AIMessage
 
     state = {
@@ -181,17 +187,18 @@ def test_review_node_builds_the_same_recommendation_on_both_passes():
     }
 
     first = ClaimRecommendation.from_engine(
-        state["eligibility"], reasoning=workflow_module._last_ai_text(state["messages"])
+        state["eligibility"],
+        reasoning=workflow_module._last_ai_text(state["messages"]),
     )
     second = ClaimRecommendation.from_engine(
-        state["eligibility"], reasoning=workflow_module._last_ai_text(state["messages"])
+        state["eligibility"],
+        reasoning=workflow_module._last_ai_text(state["messages"]),
     )
 
     assert first.model_dump() == second.model_dump()
 
 
 def test_citations_are_normalised_to_ascii_brackets():
-    """The model sometimes emits full-width brackets despite the prompt."""
     normalised = workflow_module._normalise_citations(
         "Covered 【Source: Star Health, UIN: X, Page 8】"
     )
