@@ -13,4 +13,4 @@ ENV PATH="/app/.venv/bin:$PATH"
 
 EXPOSE 8000
 
-CMD ["sh", "-c", "python Data/seed.py && uvicorn app:app --host 0.0.0.0 --port ${PORT:-8000}"]
+CMD ["sh", "-c", "[ -f data/crm.db ] || python Data/seed.py; exec uvicorn app:app --host 0.0.0.0 --port ${PORT:-8000}"]
